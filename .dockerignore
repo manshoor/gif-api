@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+temp_screenshots/*
+public/gifs/*
+.git
+.gitignore
+.env
+*.md
+.DS_Store
+coverage
+.nyc_output
+*.log

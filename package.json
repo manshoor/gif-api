@@ -1,0 +1,32 @@
+{
+  "name": "screenshot-gif-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "DEBUG=puppeteer:* nodemon --expose-gc index.js",
+    "dev-new": " DEBUG=puppeteer:* nodemon --expose-gc index-new.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "canvas": "^2.11.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "gifencoder": "^2.0.1",
+    "puppeteer": "^23.11.1",
+    "puppeteer-core": "^23.11.1",
+    "redis": "^4.7.0",
+    "supertest": "^7.0.0",
+    "user-agents": "^1.1.397",
+    "uuid": "^11.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
