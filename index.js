@@ -469,7 +469,7 @@ app.post('/create-video', async (req, res) => {
         // Clean up temporary directory
         await fsPromises.rm(sessionDir, { recursive: true, force: true });
 
-        const videoUrl = `http://${config.server.host}:${config.server.port}/public/gifs/${outputFilename}`;
+        const videoUrl = `https://${config.server.host}:${config.server.port}/public/gifs/${outputFilename}`;
 
         res.json({
             success: true,
@@ -523,7 +523,7 @@ app.post('/create-video', async (req, res) => {
 
 // Start server
 const server = app.listen(config.server.port, () => {
-    console.log(`Server running at http://${config.server.host}:${config.server.port}`);
+    console.log(`Server running at https://${config.server.host}:${config.server.port}`);
 });
 
 // Graceful shutdown
