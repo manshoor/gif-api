@@ -205,9 +205,10 @@ const validateApiKey = (req, res, next) => {
     next();
 };
 
-// Apply API key validation
-app.use('/public', validateApiKey, express.static('public'));
-app.use(validateApiKey);
+// Serve public files without API key validation
+app.use('/public', express.static('public'));
+// Apply API key validation to all other routes
+app.use(['/create-gif', '/create-video'], validateApiKey);
 
 // Create GIF endpoint
 app.post('/create-gif', async (req, res) => {
@@ -306,7 +307,7 @@ app.post('/create-gif', async (req, res) => {
             writeStream.on('error', reject);
         });
 
-        const gifUrl = `http://${config.server.host}:${config.server.port}/public/gifs/${gifFilename}`;
+        const gifUrl = `${config.server.host}/public/gifs/${gifFilename}`;
 
         res.json({
             success: true,
@@ -469,7 +470,7 @@ app.post('/create-video', async (req, res) => {
         // Clean up temporary directory
         await fsPromises.rm(sessionDir, { recursive: true, force: true });
 
-        const videoUrl = `https://${config.server.host}:${config.server.port}/public/gifs/${outputFilename}`;
+        const videoUrl = `${config.server.host}/public/gifs/${outputFilename}`;
 
         res.json({
             success: true,
