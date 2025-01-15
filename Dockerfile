@@ -4,8 +4,12 @@ FROM node:18-bullseye-slim
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NODE_ENV=production
+ENV PUPPETEER_HEADLESS=new
+# Add explicit sandbox configuration
+ENV CHROME_DEVEL_SANDBOX=/usr/local/sbin/chrome-devel-sandbox
 ENV NPM_CONFIG_LOGLEVEL=warn
 ENV CI=true
+
 
 # Install required dependencies including canvas dependencies
 RUN apt-get update && apt-get install -y \
@@ -56,7 +60,10 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install --omit=dev
+#RUN npm install --omit=dev
+RUN npm install -g npm@10.2.4
+RUN npm i --only=production && npm cache clean --force
+
 
 # Copy app source
 COPY . .
@@ -72,4 +79,4 @@ USER node
 EXPOSE 3000
 
 # Start the application
-CMD ["node", "index.js"]
+CMD [ "npm", "run", "start" ]

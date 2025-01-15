@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "DEBUG=puppeteer:* nodemon --expose-gc index.js",
+    "dev": "nodemon --expose-gc index.js",
     "dev-new": " DEBUG=puppeteer:* nodemon --expose-gc index-new.js"
   },
   "keywords": [],

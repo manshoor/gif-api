@@ -1,5 +1,12 @@
 services:
   app:
+    init: true  # Add this to handle zombie processes better
+    cap_add:
+      - SYS_ADMIN  # This helps with Chrome's sandbox
+    ulimits:
+      core: 0 # This helps with Chrome's sandbox
+    security_opt:
+      - seccomp=unconfined  # This helps with Chrome's sandbox
     build: .
     container_name: screenshot-service
     env_file: .env
@@ -15,21 +22,22 @@ services:
       - NODE_ENV=production
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
       - REDIS_URL=redis
+      - PUPPETEER_DISABLE_CRASHPAD=true
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '1'
-          memory: 1.5G
+          cpus: '2'
+          memory: 4G
         reservations:
-          cpus: '0.5'
-          memory: 1G
+          cpus: '1'
+          memory: 2G
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
+      interval: 45s
+      timeout: 20s
       retries: 3
-      start_period: 40s
+      start_period: 60s
 
   redis:
     image: redis:7-alpine
@@ -51,7 +59,7 @@ services:
       resources:
         limits:
           cpus: '1'
-          memory: 1.5G
+          memory: 2G
         reservations:
           cpus: '0.5'
           memory: 1G

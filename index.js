@@ -2,12 +2,31 @@ require('dotenv').config();
 const express = require('express');
 const puppeteer = require('puppeteer');
 const GIFEncoder = require('gifencoder');
-const { createCanvas, Image } = require('canvas');
+const {createCanvas, Image} = require('canvas');
 const fsPromises = require('fs').promises;
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { exec } = require('child_process');
+const {exec, execSync} = require('child_process');
+const cors = require('cors');
+
+// Debug logging
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', {
+        promise,
+        reason: reason instanceof Error ? {
+            message: reason.message,
+            stack: reason.stack,
+            ...reason
+        } : reason
+    });
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    // Don't exit the process here, just log
+});
+
 
 // Load configuration from environment variables
 const config = {
@@ -33,77 +52,299 @@ const config = {
     browser: {
         maxInstances: parseInt(process.env.MAX_BROWSER_INSTANCES) || 3,
         timeout: parseInt(process.env.BROWSER_TIMEOUT) || 30000
+    },
+    request: {
+        timeout: parseInt(process.env.PAGE_TIMEOUT) || 120000 // 2 minutes
+    },
+    cleanup: {
+        fileAge: parseInt(process.env.CLEANUP_FILE_AGE) || 24 * 60 * 60 * 1000, // 24 hours
+        interval: parseInt(process.env.CLEANUP_INTERVAL) || 60 * 60 * 1000 // 1 hour
     }
 };
 
 // Parse API keys from environment variable
 const API_KEYS = JSON.parse(process.env.API_KEYS || '{}');
 
+// Initialize Express app
 const app = express();
 const rateLimits = new Map();
 let activeBrowsers = new Set();
 
-app.use(express.json());
+const setupProcessErrorHandlers = () => {
+    process.on('uncaughtException', (error) => {
+        logger.error('Uncaught Exception:', error);
+        process.exit(1);
+    });
 
-// Create required directories
-const screenshotsDir = path.join(__dirname, config.dirs.screenshots);
-const gifsDir = path.join(__dirname, config.dirs.gifs);
-fsPromises.mkdir(screenshotsDir, { recursive: true }).catch(console.error);
-fsPromises.mkdir(gifsDir, { recursive: true }).catch(console.error);
+    process.on('unhandledRejection', (reason, promise) => {
+        logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    });
 
-// Process management functions
-const killChromiumProcesses = async () => {
-    return new Promise((resolve) => {
-        exec('pkill -f chromium', (error) => {
-            if (error && error.code !== 1) {
-                console.error('Error killing chromium processes:', error);
-            }
-            resolve();
-        });
+    // Handle memory warnings
+    process.on('warning', (warning) => {
+        logger.warn('Process warning:', warning);
+        // Add warning to the logs
+        if(warning.name === 'MemoryWarning') {
+            checkMemoryUsage();
+        }
     });
 };
 
-const cleanupBrowsers = async () => {
-    try {
-        for (const browser of activeBrowsers) {
-            await browser.close();
-        }
-        activeBrowsers.clear();
-        await killChromiumProcesses();
-    } catch (error) {
-        console.error('Error cleaning up browsers:', error);
+// Logging utility
+const logger = {
+    info: (message, meta = {}) => {
+        console.log(JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message,
+            ...meta
+        }));
+    },
+    error: (message, error, meta = {}) => {
+        console.error(JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message,
+            error: error.message,
+            stack: error.stack,
+            ...meta
+        }));
     }
 };
 
-// Periodic cleanup
-setInterval(async () => {
-    if (activeBrowsers.size > config.browser.maxInstances) {
-        console.log('Too many browser instances, cleaning up...');
-        await cleanupBrowsers();
-    }
-}, 60000);
+// Middleware
+app.use(express.json());
+app.use(cors());
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    const health = {
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        activeBrowsers: activeBrowsers.size,
-        memoryUsage: process.memoryUsage(),
-        uptime: process.uptime()
-    };
-    res.json(health);
+// Add correlation ID to requests
+app.use((req, res, next) => {
+    req.correlationId = crypto.randomBytes(16).toString('hex');
+    next();
 });
+
+app.use(async (err, req, res, next) => {
+    if (!res.headersSent) {
+        logger.error('Application error:', {
+            error: err.message,
+            stack: err.stack,
+            correlationId: req.correlationId
+        });
+
+        res.status(500).json({
+            error: 'Internal server error',
+            message: err.message,
+            correlationId: req.correlationId
+        });
+    }
+});
+
+// Helper Functions
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+const generateUniqueFilename = (extension = 'gif') => crypto.randomBytes(16).toString('hex') + '.' + extension;
+
+const generateScreenshotName = (url, index, sessionId) => {
+    const urlHash = crypto.createHash('md5').update(url).digest('hex').substring(0, 8);
+    return `${urlHash}_${sessionId}_screenshot_${index}.png`;
+};
+
+const validateUrl = (url) => {
+    try {
+        const parsedUrl = new URL(url);
+        return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
+    } catch {
+        return false;
+    }
+};
+
+const fileExists = async (filePath) => {
+    try {
+        await fsPromises.access(filePath, fs.constants.F_OK);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const safeDeleteFile = async (filePath) => {
+    try {
+        if(await fileExists(filePath)) {
+            await fsPromises.unlink(filePath);
+            return true;
+        }
+    } catch(error) {
+        if(error.code !== 'ENOENT') {
+            logger.error(`Error deleting file ${filePath}`, error);
+        }
+    }
+    return false;
+};
+
+const ensureDirectory = async (dirPath) => {
+    try {
+        await fsPromises.mkdir(dirPath, {recursive: true});
+    } catch(error) {
+        if(error.code !== 'EEXIST') {
+            throw error;
+        }
+    }
+};
+async function ensureDirectoryExists(dir) {
+    try {
+        await fsPromises.access(dir);
+    } catch {
+        await fsPromises.mkdir(dir, { recursive: true });
+        logger.info('Created directory', { dir });
+    }
+}
+const withRetry = async (operation, maxRetries = 3) => {
+    let lastError;
+    for(let i = 0; i < maxRetries; i++) {
+        try {
+            return await operation();
+        } catch(error) {
+            lastError = error;
+            await delay(1000 * Math.pow(2, i)); // Exponential backoff
+        }
+    }
+    throw lastError;
+};
+
+// Initialize directories
+const initializeDirectories = async () => {
+    const screenshotsDir = path.join(__dirname, config.dirs.screenshots);
+    const gifsDir = path.join(__dirname, config.dirs.gifs);
+    try {
+        await Promise.all([
+            ensureDirectory(screenshotsDir),
+            ensureDirectory(gifsDir),
+            ensureDirectory(path.join(__dirname, 'temp'))
+        ]);
+    } catch(error) {
+        logger.error('Error creating directories', error);
+        process.exit(1);
+    }
+};
+
+// Process management functions
+const killChromiumProcesses = async () => {
+    try {
+        // First try using process signals
+        const chromiumPs = execSync('ps aux | grep -i chrom').toString();
+        const processes = chromiumPs.split('\n')
+                                    .filter(line => line.includes('chromium') || line.includes('chrome'))
+                                    .map(line => line.split(/\s+/)[1])
+                                    .filter(Boolean);
+
+        for(const pid of processes) {
+            try {
+                process.kill(parseInt(pid), 'SIGTERM');
+            } catch(e) {
+                // Ignore errors for processes we can't kill
+                logger.info(`Could not kill process ${pid}`, e);
+            }
+        }
+    } catch(error) {
+        logger.error('Error in kill chromium processes', error);
+    }
+};
+
+const cleanupZombieProcesses = async () => {
+/*
+    try {
+        // Fix the command syntax
+        execSync(`ps -A -ostat,ppid | grep -e '[zZ]' | awk '{print $2}' | xargs -r kill -9`);
+    } catch(error) {
+        if(error.status !== 1) {
+            logger.error('Error cleaning zombie processes', error);
+        }
+    }
+*/
+
+    try {
+        const result = execSync('ps aux | grep -i chrome').toString();
+        const zombieProcesses = result.split('\n')
+                                      .filter(line => line.includes('<defunct>'))
+                                      .map(line => line.split(/\s+/)[1]);
+
+        if (zombieProcesses.length > 0) {
+            logger.info(`Cleaning up ${zombieProcesses.length} zombie processes`);
+            zombieProcesses.forEach(pid => {
+                try {
+                    process.kill(parseInt(pid), 'SIGKILL');
+                } catch (e) {
+                    // Ignore errors for already dead processes
+                }
+            });
+        }
+    } catch (error) {
+        logger.error('Error in zombie process cleanup:', error);
+    }
+};
+
+const cleanupBrowsers = async () => {
+    logger.info(`Cleaning up browsers. Active count: ${activeBrowsers.size}`);
+    try {
+        // Close all browser instances first
+        for(const browser of activeBrowsers) {
+            try {
+                const pages = await browser.pages();
+                await Promise.all(pages.map(page => page.close().catch(() => {})));
+                await browser.close().catch(() => {});
+            } catch(error) {
+                logger.error('Error closing browser', error);
+            }finally {
+                activeBrowsers.delete(browser);
+            }
+        }
+        activeBrowsers.clear();
+
+        // Then kill any remaining processes
+        await killChromiumProcesses();
+    } catch(error) {
+        logger.error('Error in cleanup', error);
+    }
+};
+// Memory monitoring
+const checkMemoryUsage = () => {
+    const used = process.memoryUsage();
+    const threshold = 1024 * 1024 * 1024; // 1GB
+
+    if(used.heapUsed > threshold) {
+        logger.info('High memory usage detected', {memoryUsage: used});
+        if(global.gc) {
+            global.gc();
+        }
+    }
+};
 
 // Browser management
 const createBrowserInstance = async () => {
-    if (activeBrowsers.size >= config.browser.maxInstances) {
-        throw new Error('Maximum browser instances reached');
+    // First, clean up any existing zombie processes
+    try {
+        await execSync('pkill -f "chrome_crashpad" || true');
+    } catch (e) {
+        logger.error('Error cleaning up crashpad processes:', e);
+    }
+    if(activeBrowsers.size >= config.browser.maxInstances) {
+        // Force cleanup of old instances
+        await cleanupBrowsers();
+        await delay(1000); // Give some time for cleanup
     }
 
     const browser = await puppeteer.launch({
         headless: process.env.PUPPETEER_HEADLESS,
+        handleSIGINT: true,
+        handleSIGTERM: true,
+        handleSIGHUP: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+        timeout: parseInt(process.env.BROWSER_LAUNCH_TIMEOUT) || 60000,
+        pipe: true, // Use pipe instead of WebSocket
+        dumpio: true, // Log browser process stdout and stderr
         args: [
+            '--ignore-certificate-errors',
+            '--ignore-certificate-errors-skip-list',
+            '--autoplay-policy=user-gesture-required',
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
@@ -115,51 +356,87 @@ const createBrowserInstance = async () => {
             '--disable-ipc-flooding-protection',
             `--window-size=${config.viewport.width},${config.viewport.height}`,
             '--no-zygote',
-            '--single-process'
+            '--single-process',
+            '--disable-crashpad',
+            '--disable-crash-reporter',
+            '--disable-features=CrashpadReporter',
+             '--disable-web-security',
+            '--disable-features=site-per-process',
+            '--disable-features=IsolateOrigins',
+            '--disable-site-isolation-trials',
+            '--autoplay-policy=no-user-gesture-required',
+             '--no-crash-upload', // Prevent crash reporter
+            '--disable-crash-reporter', // Disable crash reporter
+            '--disable-breakpad', // Disable crash reporting
+            '--disable-features=CrashpadReporter,CrashReporter',
         ]
     });
 
-    activeBrowsers.add(browser);
-
-    // Auto-close browser after timeout
-    setTimeout(async () => {
-        if (activeBrowsers.has(browser)) {
-            try {
-                await browser.close();
-                activeBrowsers.delete(browser);
-            } catch (error) {
-                console.error('Error auto-closing browser:', error);
-            }
+    // Add error handling for browser disconnection
+    browser.on('disconnected', async () => {
+        logger.info('Browser disconnected, cleaning up...');
+        activeBrowsers.delete(browser);
+        logger.info('Browser disconnected, cleaning up resources');
+        try {
+            await execSync('pkill -f "chrome_crashpad" || true');
+        } catch (e) {
+            logger.error('Error cleaning up after browser disconnect:', e);
         }
-    }, config.browser.timeout);
+        await cleanupZombieProcesses();
+    });
 
     return browser;
 };
 
-// [Previous helper functions remain the same]
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-const generateUniqueFilename = () => crypto.randomBytes(16).toString('hex') + '.gif';
-const fileExists = async (filePath) => {
-    try {
-        await fsPromises.access(filePath);
-        return true;
-    } catch {
-        return false;
-    }
-};
-const safeDeleteFile = async (filePath) => {
-    try {
-        if (await fileExists(filePath)) {
-            await fsPromises.unlink(filePath);
-            return true;
-        }
-    } catch (error) {
-        console.error(`Error deleting file ${filePath}:`, error.message);
-    }
-    return false;
-};
+// Add this new function
+const createPageWithTimeout = async (browser) => {
+    const page = await browser.newPage();
 
-// Rate limiting functions [remain the same]
+    // Set a default timeout for all operations
+    page.setDefaultTimeout(30000);
+
+    // Set up error handling
+    page.on('console', msg => {
+        logger.info('Browser console:', {
+            type: msg.type(),
+            text: msg.text(),
+            location: msg.location()?.url  // Add source location if available
+        });
+    });
+
+    page.on('requestfailed', request => {
+        logger.error('Failed request:', {
+            url: request.url(),
+            errorText: request.failure()?.errorText || 'Unknown error',
+            method: request.method(),
+            resourceType: request.resourceType()
+        });
+    });
+
+    // Add page error handler
+    page.on('pageerror', error => {
+        logger.error('Page error:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name
+        });
+        });
+
+    // Add response error handler
+    page.on('response', response => {
+        if (!response.ok()) {
+            logger.error('Failed response:', {
+                url: response.url(),
+                status: response.status(),
+                statusText: response.statusText(),
+                headers: response.headers()
+    });
+        }
+    });
+
+    return page;
+};
+// Rate limiting functions
 const isRateLimitExceeded = (apiKey) => {
     const today = new Date().toDateString();
     const key = `${apiKey}_${today}`;
@@ -181,19 +458,19 @@ const getNextResetTime = () => {
     return tomorrow;
 };
 
-// Middleware [remains the same]
+// Middleware
 const validateApiKey = (req, res, next) => {
     const apiKey = req.headers['x-api-key'] || req.query.key;
 
-    if (!apiKey) {
-        return res.status(401).json({ error: 'API key is required' });
+    if(!apiKey) {
+        return res.status(401).json({error: 'API key is required'});
     }
 
-    if (!API_KEYS[apiKey]) {
-        return res.status(401).json({ error: 'Invalid API key' });
+    if(!API_KEYS[apiKey]) {
+        return res.status(401).json({error: 'Invalid API key'});
     }
 
-    if (isRateLimitExceeded(apiKey)) {
+    if(isRateLimitExceeded(apiKey)) {
         return res.status(429).json({
             error: 'Rate limit exceeded',
             limit: API_KEYS[apiKey].rateLimit,
@@ -205,77 +482,136 @@ const validateApiKey = (req, res, next) => {
     next();
 };
 
-// Serve public files without API key validation
+// Routes
 app.use('/public', express.static('public'));
 // Apply API key validation to all other routes
 app.use(['/create-gif', '/create-video'], validateApiKey);
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+    const health = {
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        activeBrowsers: activeBrowsers.size,
+        memoryUsage: process.memoryUsage(),
+        uptime: process.uptime()
+    };
+    res.json(health);
+});
+
 // Create GIF endpoint
-app.post('/create-gif', async (req, res) => {
-    const { url, duration = config.screenshot.defaultDuration } = req.body;
+const handleGifCreation = async (req, res) => {
+    const {url, duration = config.screenshot.defaultDuration} = req.body;
     const fps = 1 / config.screenshot.delay;
+    const sessionId = crypto.randomBytes(8).toString('hex');
 
     let browser = null;
     let page = null;
     const screenshotFiles = new Set();
     let outputPath = null;
 
-    if (!url) {
-        return res.status(400).json({ error: 'URL is required' });
+    if(!url || !validateUrl(url)) {
+        return res.status(400).json({error: 'Valid URL is required'});
     }
 
     try {
-        if (activeBrowsers.size >= config.browser.maxInstances) {
+        if(activeBrowsers.size >= config.browser.maxInstances) {
             await cleanupBrowsers();
         }
 
         browser = await createBrowserInstance();
-        page = await browser.newPage();
+        page = await createPageWithTimeout(browser);
 
         await page.setViewport({
             width: config.viewport.width,
             height: config.viewport.height
+            });
+
+        await withRetry(async () => {
+            await page.setBypassCSP(true);
+            await page.goto(url, {
+                waitUntil: ['networkidle0', 'domcontentloaded'],
+                timeout: 30000
+        });
+            await page.evaluate(() => {
+                const videos = document.querySelectorAll('video');
+                videos.forEach(video => {
+                    video.muted = true;
+                    video.autoplay = true;
+                    video.playsinline = true;
+
+                    // Remove any existing play/pause event listeners
+                    const oldElement = video.cloneNode(true);
+                    video.parentNode.replaceChild(oldElement, video);
+                });
+            });
+            // Use our custom delay function instead
+            await delay(2000);
+
+            // Wait for key elements to be ready
+            await page.waitForFunction(() => {
+                return document.readyState === 'complete' &&
+                    !document.querySelector('.loading') &&
+                    performance.now() > 2000;
+            }, { timeout: 30000 });
         });
 
-        await page.goto(url, {
-            waitUntil: ['networkidle0', 'domcontentloaded'],
-            timeout: 30000
-        });
-
-        await delay(2000);
-
+        const screenshots = [];
         const totalFrames = Math.ceil(duration * fps);
         const delayMs = 1000 / fps;
 
-        const screenshots = [];
-        for (let i = 0; i < totalFrames; i++) {
-            const screenshotPath = path.join(screenshotsDir, `screenshot_${i}.png`);
-            try {
-                await page.screenshot({
-                    path: screenshotPath,
-                    type: 'png',
-                    fullPage: false
-                });
-                screenshotFiles.add(screenshotPath);
-                screenshots.push(screenshotPath);
-            } catch (error) {
-                console.error(`Error taking screenshot ${i}:`, error);
-            }
-            await delay(delayMs);
-        }
+        try {
+            for (let i = 0; i < totalFrames; i++) {
+                const screenshotName = generateScreenshotName(url, i, sessionId);
+                const screenshotPath = path.join(config.dirs.screenshots, screenshotName);
 
+                try {
+                    // Wait briefly for any animations to complete
+                    await delay(delayMs);
+
+                    // Ensure the page is still valid
+                    if (!page.isClosed()) {
+                        await page.screenshot({
+                            path: screenshotPath,
+                            type: 'png',
+                            fullPage: false,
+                            omitBackground: false
+                        });
+                        screenshotFiles.add(screenshotPath);
+                        screenshots.push(screenshotPath);
+                    } else {
+                        throw new Error('Page was closed during screenshot process');
+                    }
+                } catch (error) {
+                    logger.error(`Error taking screenshot ${i}`, error, {
+                        screenshotName,
+                        correlationId: req.correlationId,
+                        frameNumber: i,
+                        totalFrames
+                    });
+                    // Continue with next screenshot even if one fails
+                }
+            }
+        } catch (error) {
+            logger.error('Error in screenshot loop', error, {
+                correlationId: req.correlationId,
+                screenshotsCaptures: screenshots.length,
+                totalFramesAttempted: totalFrames
+            });
+            throw error;  // Re-throw to be caught by main error handler
+        }
         await page.close();
         await browser.close();
         activeBrowsers.delete(browser);
         page = null;
         browser = null;
 
-        if (screenshots.length === 0) {
+        if(screenshots.length === 0) {
             throw new Error('No screenshots were captured');
         }
 
         const gifFilename = generateUniqueFilename();
-        outputPath = path.join(gifsDir, gifFilename);
+        outputPath = path.join(config.dirs.gifs, gifFilename);
 
         const encoder = new GIFEncoder(config.viewport.width, config.viewport.height);
         const canvas = createCanvas(config.viewport.width, config.viewport.height);
@@ -288,15 +624,37 @@ app.post('/create-gif', async (req, res) => {
         encoder.setFrameRate(fps);
         encoder.setQuality(config.gif.quality);
 
-        for (const screenshot of screenshots) {
-            if (await fileExists(screenshot)) {
-                const img = new Image();
-                const imgBuffer = await fsPromises.readFile(screenshot);
-                img.src = imgBuffer;
-                ctx.drawImage(img, 0, 0);
-                encoder.addFrame(ctx);
-                await safeDeleteFile(screenshot);
-                screenshotFiles.delete(screenshot);
+        for(const screenshot of screenshots) {
+            if(await fileExists(screenshot)) {
+                try {
+                    const loadImage = () => new Promise((resolve, reject) => {
+                        const img = new Image();
+                        img.onload = () => resolve(img);
+                        img.onerror = reject;
+                        const imgBuffer = fs.readFileSync(screenshot);
+                        img.src = imgBuffer;
+                    });
+
+                    const img = await loadImage();
+                    ctx.clearRect(0, 0, config.viewport.width, config.viewport.height);
+                    ctx.drawImage(img, 0, 0);
+                    encoder.addFrame(ctx);
+                } catch(error) {
+                    logger.error(`Error processing frame`, error, {
+                        screenshot,
+                        correlationId: req.correlationId
+                    });
+                } finally {
+                    try {
+                        await safeDeleteFile(screenshot);
+                        screenshotFiles.delete(screenshot);
+                    } catch(deleteError) {
+                        logger.error(`Error deleting screenshot`, deleteError, {
+                            screenshot,
+                            correlationId: req.correlationId
+                        });
+                    }
+                }
             }
         }
 
@@ -307,6 +665,9 @@ app.post('/create-gif', async (req, res) => {
             writeStream.on('error', reject);
         });
 
+        // Wait a brief moment to ensure file system operations are complete
+        await delay(100);
+
         const gifUrl = `${config.server.host}/public/gifs/${gifFilename}`;
 
         res.json({
@@ -315,9 +676,9 @@ app.post('/create-gif', async (req, res) => {
             message: 'GIF created successfully'
         });
 
-    } catch (error) {
-        console.error('Error:', error);
-        if (outputPath && await fileExists(outputPath)) {
+    } catch(error) {
+        logger.error('Error creating GIF', error, {correlationId: req.correlationId});
+        if(outputPath && await fileExists(outputPath)) {
             await safeDeleteFile(outputPath);
         }
         res.status(500).json({
@@ -326,43 +687,251 @@ app.post('/create-gif', async (req, res) => {
         });
     } finally {
         try {
-            if (page) await page.close();
-            if (browser) {
-                await browser.close();
-                activeBrowsers.delete(browser);
+            if(page) {
+                try {
+                    await page.close().catch(() => {
+                    });
+                } catch(e) {
+                    logger.error('Error closing page', e);
+                }
             }
+            if(browser) {
+                try {
+                    await browser.close().catch(() => {
+                    });
+                    activeBrowsers.delete(browser);
+                } catch(e) {
+                    logger.error('Error closing browser', e);
+                }
+            }
+            for(const file of screenshotFiles) {
+                await safeDeleteFile(file).catch(() => {
+                });
+            }
+        } catch(error) {
+            logger.error('Cleanup error', error);
+        }
+    }
+};
 
-            for (const file of screenshotFiles) {
-                await safeDeleteFile(file);
-            }
-        } catch (error) {
-            console.error('Cleanup error:', error);
+app.post('/create-gif', async (req, res) => {
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Request timeout')), config.request.timeout);
+    });
+
+    try {
+        await Promise.race([
+            handleGifCreation(req, res),
+            timeoutPromise
+        ]);
+    } catch(error) {
+        if(error.message === 'Request timeout') {
+            res.status(504).json({error: 'Request timed out'});
+        } else {
+            res.status(500).json({
+                error: 'Failed to create GIF',
+                details: error.message
+            });
         }
     }
 });
 
+// Helper function to capture frames
+async function captureFrames(client, totalFrames, maxDuration) {
+    const frames = [];
+    let isCapturing = true;
+    let startTime = Date.now();
+
+    try {
+        logger.info('Starting screencast', {
+            totalFrames,
+            maxDuration,
+            timestamp: startTime
+        });
+
+    await client.send('Page.startScreencast', {
+        format: 'jpeg',
+            quality: 90,
+        maxWidth: config.viewport.width,
+        maxHeight: config.viewport.height,
+        everyNthFrame: 1
+    });
+
+        const framePromise = new Promise((resolve, reject) => {
+            const frameHandler = async (event) => {
+                try {
+            if(!isCapturing) return;
+
+                    const { data, sessionId, metadata } = event;
+                    frames.push(data);
+
+                    // Acknowledge frame receipt
+                    await client.send('Page.screencastFrameAck', { sessionId });
+
+                    if (frames.length % 10 === 0) {
+                        logger.info('Frame capture progress', {
+                        frameCount: frames.length,
+                        totalFrames,
+                        timestamp: Date.now(),
+                            elapsed: (Date.now() - startTime) / 1000
+                    });
+                    }
+
+            if(frames.length >= totalFrames) {
+                isCapturing = false;
+                client.off('Page.screencastFrame', frameHandler);
+                resolve();
+            }
+                } catch (error) {
+                    logger.error('Error in frame handler', {
+                        error,
+                        frameCount: frames.length,
+                        totalFrames
+                    });
+                    reject(error);
+                }
+        };
+
+        client.on('Page.screencastFrame', frameHandler);
+    });
+
+    const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => {
+                logger.info('Capture timeout reached', {
+                    framesCaptured: frames.length,
+                    totalFrames,
+                    duration: (Date.now() - startTime) / 1000
+                });
+            isCapturing = false;
+            resolve();
+        }, maxDuration * 1000);
+    });
+
+        // Wait for either completion or timeout
+    await Promise.race([framePromise, timeoutPromise]);
+
+    } catch (error) {
+        logger.error('Error in captureFrames', {
+            error,
+            framesCaptured: frames.length,
+            totalFrames,
+            duration: (Date.now() - startTime) / 1000
+        });
+        throw error;
+    } finally {
+        try {
+            // Ensure screencast is stopped
+            await client.send('Page.stopScreencast').catch(() => {});
+            logger.info('Screencast stopped', {
+                finalFrameCount: frames.length,
+                totalDuration: (Date.now() - startTime) / 1000
+            });
+        } catch (error) {
+            logger.error('Error stopping screencast', error);
+        }
+    }
+
+    if (frames.length === 0) {
+        throw new Error('No frames captured during recording');
+    }
+
+    return frames;
+}
+
+// Helper function to generate output using FFmpeg
+async function generateOutput(sessionDir, outputPath, fps, format) {
+    return new Promise((resolve, reject) => {
+        const width = Math.min(config.viewport.width, 800);
+
+        // Different commands for different formats
+        const ffmpegCommands = {
+            gif: `ffmpeg -y -framerate ${fps} -i ${sessionDir}/frame_%06d.jpg `
+                + `-vf "fps=${fps},scale=${width}:-1:flags=lanczos,split[s0][s1];`
+                + `[s0]palettegen=max_colors=256:stats_mode=diff[p];`
+                + `[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" `
+                + `-f gif ${outputPath}`,
+            mp4: `ffmpeg -y -framerate ${fps} -i ${sessionDir}/frame_%06d.jpg `
+                + `-c:v libx264 -preset medium -crf 23 -movflags +faststart `
+                + `-pix_fmt yuv420p ${outputPath}`
+        };
+
+        const command = ffmpegCommands[format] || ffmpegCommands.gif;
+
+        logger.info('Starting FFmpeg conversion', {
+            format,
+            fps,
+            outputPath,
+            command
+        });
+
+        exec(command, (error, stdout, stderr) => {
+            if(error) {
+                logger.error('FFmpeg error', {
+                    error,
+                    stderr,
+                    command,
+                    outputPath
+                });
+                reject(new Error(`FFmpeg error: ${stderr}`));
+            } else {
+                logger.info('FFmpeg conversion complete', {
+                    outputPath,
+                    format
+                });
+                resolve();
+            }
+        });
+    });
+}
+
+// Create Video endpoint
 app.post('/create-video', async (req, res) => {
-    const { url, duration = config.screenshot.defaultDuration, format = 'gif' } = req.body;
+    const {url, duration = config.screenshot.defaultDuration, format = 'gif'} = req.body;
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    const startTime = Date.now();
 
     let browser = null;
     let page = null;
     let client = null;
     let outputPath = null;
-    const sessionId = crypto.randomBytes(16).toString('hex');
+    let sessionDir = null;
 
-    if (!url) {
-        return res.status(400).json({ error: 'URL is required' });
+    logger.info('Starting video creation request', {
+        url,
+        format,
+        duration,
+        sessionId,
+        correlationId: req.correlationId
+    });
+
+    if(!url || !validateUrl(url)) {
+        return res.status(400).json({error: 'Valid URL is required'});
+    }
+
+    if (!format.match(/^(gif|mp4)$/)) {
+        return res.status(400).json({
+            error: 'Invalid format',
+            message: 'Only gif and mp4 formats are supported'
+        });
     }
 
     try {
-        if (activeBrowsers.size >= config.browser.maxInstances) {
+        if(activeBrowsers.size >= config.browser.maxInstances) {
+            logger.info('Cleaning up browsers before new request', {
+                activeBrowsers: activeBrowsers.size,
+                sessionId
+            });
             await cleanupBrowsers();
         }
 
-        browser = await createBrowserInstance();
-        page = await browser.newPage();
+        // Create and ensure directories
+        sessionDir = path.join(__dirname, 'temp', sessionId);
+        await ensureDirectoryExists(sessionDir);
+        await ensureDirectoryExists(path.join(__dirname, config.dirs.gifs));
 
-        // Get CDP session
+        // Initialize browser and page
+        browser = await createBrowserInstance();
+        page = await createPageWithTimeout(browser);
         client = await page.createCDPSession();
 
         await page.setViewport({
@@ -370,107 +939,94 @@ app.post('/create-video', async (req, res) => {
             height: config.viewport.height
         });
 
-        await page.goto(url, {
+        // Navigate to URL with retry logic
+        await withRetry(async () => {
+            await page.goto(url, {
             waitUntil: ['networkidle0', 'domcontentloaded'],
             timeout: 30000
-        });
+            });
 
         await delay(2000);
 
-        // Create temporary directory for this session
-        const sessionDir = path.join(__dirname, 'temp', sessionId);
-        await fsPromises.mkdir(sessionDir, { recursive: true });
-
-        // Calculate frame capture parameters
-        const maxDuration = Math.min(duration, config.screenshot.defaultDuration);
-        const fps = 10; // Set a fixed frame rate for smoother capture
-        const totalFrames = Math.ceil(maxDuration * fps);
-        const captureInterval = 1000 / fps;
-
-        console.log(`Starting capture: ${totalFrames} frames over ${maxDuration} seconds at ${fps} fps`);
-
-        // Start recording using CDP
-        const frames = [];
-        let frameCount = 0;
-        let isCapturing = true;
-
-        await client.send('Page.startScreencast', {
-            format: 'jpeg',
-            quality: 70,
-            maxWidth: config.viewport.width,
-            maxHeight: config.viewport.height,
-            everyNthFrame: 1
-        });
-
-        const framePromise = new Promise((resolve, reject) => {
-            const frameHandler = async (frame) => {
-                if (!isCapturing) return;
-
-                frames.push(frame.data);
-                frameCount++;
-
-                await client.send('Page.screencastFrameAck', { sessionId: frame.sessionId });
-
-                console.log(`Captured frame ${frameCount}/${totalFrames}`);
-
-                if (frameCount >= totalFrames) {
-                    isCapturing = false;
-                    client.off('Page.screencastFrame', frameHandler);
-                    resolve();
-                }
-            };
-
-            client.on('Page.screencastFrame', frameHandler);
-        });
-
-        // Set a timeout for the maximum duration
-        const timeoutPromise = new Promise((resolve) => {
-            setTimeout(() => {
-                isCapturing = false;
-                resolve();
-            }, maxDuration * 1000);
-        });
-
-        // Wait for either frame capture completion or timeout
-        await Promise.race([framePromise, timeoutPromise]);
-
-        // Stop the screencast
-        await client.send('Page.stopScreencast');
-
-        // Stop recording
-        await client.send('Page.stopScreencast');
-
-        // Generate unique filename
-        const outputFilename = `${sessionId}.${format}`;
-        outputPath = path.join(__dirname, config.dirs.gifs, outputFilename);
-
-        // Write frames to temporary files
-        for (let i = 0; i < frames.length; i++) {
-            const framePath = path.join(sessionDir, `frame_${i.toString().padStart(6, '0')}.jpg`);
-            await fsPromises.writeFile(framePath, frames[i], 'base64');
-        }
-
-        // Use FFmpeg to create video
-        await new Promise((resolve, reject) => {
-            const width = Math.min(config.viewport.width, 800);
-            const ffmpegCommand = format === 'gif'
-                ? `ffmpeg -framerate ${fps} -i ${sessionDir}/frame_%06d.jpg -vf "fps=${fps},scale=${width}:-1:flags=lanczos,crop=iw-mod(iw\\,2):ih-mod(ih\\,2),split[s0][s1];[s0]palettegen=max_colors=64:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -f gif ${outputPath}`
-                : `ffmpeg -framerate ${fps} -i ${sessionDir}/frame_%06d.jpg -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p -movflags +faststart ${outputPath}`;
-
-            exec(ffmpegCommand, (error, stdout, stderr) => {
-                if (error) {
-                    console.error('FFmpeg error:', stderr);
-                    reject(error);
-                } else {
-                    resolve();
-                }
+            // Wait for page to be fully loaded
+            await page.evaluate(() => {
+                return new Promise((resolve) => {
+                    if (document.readyState === 'complete') {
+                        resolve();
+                    } else {
+                        window.addEventListener('load', resolve);
+                    }
+                });
             });
         });
 
-        // Clean up temporary directory
-        await fsPromises.rm(sessionDir, { recursive: true, force: true });
+        // Setup capture parameters
+        const maxDuration = Math.min(duration, config.screenshot.defaultDuration);
+        const fps = 10;
+        const totalFrames = Math.ceil(maxDuration * fps);
 
+        logger.info('Starting video capture', {
+            totalFrames,
+            maxDuration,
+            fps,
+            format,
+            sessionId
+        });
+
+        // Capture frames
+        const frames = await captureFrames(client, totalFrames, maxDuration);
+
+        logger.info('Starting frame writing', {
+            frameCount: frames.length,
+            sessionDir
+        });
+
+        // Write frames to disk
+        let writtenFrames = 0;
+        await Promise.all(frames.map(async (frameData, index) => {
+            const framePath = path.join(sessionDir, `frame_${index.toString().padStart(6, '0')}.jpg`);
+            try {
+                await fsPromises.writeFile(framePath, frameData, 'base64');
+                writtenFrames++;
+
+                if (writtenFrames % 10 === 0) {
+                    logger.info('Frame writing progress', {
+                        writtenFrames,
+                        totalFrames: frames.length,
+                        sessionId
+                    });
+                }
+            } catch (error) {
+                logger.error('Error writing frame', {
+                    frameIndex: index,
+                    error,
+                    sessionId
+                });
+                throw error;
+            }
+        }));
+
+        logger.info('Frame writing complete', {
+            writtenFrames,
+            totalFrames: frames.length,
+            sessionId
+        });
+
+        // Generate output file
+        const outputFilename = `${sessionId}.${format}`;
+        outputPath = path.join(config.dirs.gifs, outputFilename);
+
+        await generateOutput(sessionDir, outputPath, fps, format);
+
+        // Generate response URL
         const videoUrl = `${config.server.host}/public/gifs/${outputFilename}`;
+
+        logger.info('Video creation successful', {
+            url: videoUrl,
+            format,
+            sessionId,
+            duration: (Date.now() - startTime) / 1000
+        });
 
         res.json({
             success: true,
@@ -479,71 +1035,193 @@ app.post('/create-video', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error:', error);
-        if (outputPath && await fileExists(outputPath)) {
-            await safeDeleteFile(outputPath);
-        }
+        const errorDuration = (Date.now() - startTime) / 1000;
+        logger.error('Error creating video', {
+            error,
+            correlationId: req.correlationId,
+            sessionId,
+            duration: errorDuration
+        });
         res.status(500).json({
             error: `Failed to create ${format.toUpperCase()}`,
             details: error.message
         });
     } finally {
         try {
-            // First detach CDP session if it exists
+            // Cleanup in specific order
             if (client) {
                 try {
                     await client.detach().catch(() => {});
                 } catch (e) {
-                    // Ignore detachment errors
+                    logger.error('Error detaching CDP session', e, { sessionId });
                 }
             }
 
-            // Then close the page
             if (page) {
                 try {
                     await page.close().catch(() => {});
                 } catch (e) {
-                    console.error('Error closing page:', e);
+                    logger.error('Error closing page', e, { sessionId });
                 }
             }
 
-            // Finally close the browser
-            if (browser) {
+            if(browser) {
                 try {
-                    await browser.close().catch(() => {});
+                await browser.close().catch(() => {
+                });
                 activeBrowsers.delete(browser);
                 } catch (e) {
-                    console.error('Error closing browser:', e);
-                }
+                    logger.error('Error closing browser', e, { sessionId });
             }
-        } catch (error) {
-            console.error('Cleanup error:', error);
+            }
+
+            // Cleanup directories and files
+            if(sessionDir) {
+                try {
+                    await fsPromises.rm(sessionDir, { recursive: true, force: true })
+                        .catch((e) => logger.error('Error removing session directory', e, { sessionDir, sessionId }));
+                } catch (e) {
+                    logger.error('Error in session directory cleanup', e, { sessionDir, sessionId });
+            }
+            }
+
+            const cleanupDuration = (Date.now() - startTime) / 1000;
+            logger.info('Cleanup completed', {
+                sessionId,
+                totalDuration: cleanupDuration
+            });
+        } catch(error) {
+            logger.error('Error in cleanup', error, {
+                correlationId: req.correlationId,
+                sessionId
+            });
         }
     }
 });
 
-// Start server
-const server = app.listen(config.server.port, () => {
-    console.log(`Server running at https://${config.server.host}:${config.server.port}`);
-});
+// Periodic cleanup functions
+setInterval(async () => {
+    if(activeBrowsers.size > config.browser.maxInstances) {
+        logger.info('Too many browser instances, cleaning up...');
+        await cleanupBrowsers();
+    }
+}, 60000);
+
+setInterval(async () => {
+    try {
+        const zombieCount = parseInt(execSync('ps -A -ostat,ppid | grep -c -e "[zZ]"').toString());
+        if(zombieCount > 10) {
+            logger.info(`Detected ${zombieCount} zombie processes, cleaning up...`);
+            await cleanupBrowsers();
+        }
+    } catch(error) {
+        logger.error('Error checking zombie processes', error);
+    }
+}, 300000);
+
+setInterval(checkMemoryUsage, 60000);
+
+// Cleanup old files
+setInterval(async () => {
+    try {
+        const now = Date.now();
+        const gifsDir = path.join(__dirname, config.dirs.gifs);
+        const files = await fsPromises.readdir(gifsDir);
+        for(const file of files) {
+            const filePath = path.join(gifsDir, file);
+            const stats = await fsPromises.stat(filePath);
+            if(now - stats.mtimeMs > config.cleanup.fileAge) {
+                await safeDeleteFile(filePath);
+            }
+        }
+    } catch(error) {
+        logger.error('Error cleaning up old files', error);
+    }
+}, config.cleanup.interval);
 
 // Graceful shutdown
 const gracefulShutdown = async (signal) => {
-    console.log(`${signal} received. Starting graceful shutdown...`);
+    logger.info(`${signal} received. Starting graceful shutdown...`);
 
     server.close(async () => {
-        console.log('HTTP server closed');
+        logger.info('HTTP server closed');
         await cleanupBrowsers();
-        console.log('Browsers cleaned up');
+
+        // Add extra cleanup for any remaining processes
+        try {
+            execSync('pkill -f "(chrome|chromium)"');
+            execSync('kill -9 $(ps -A -ostat,ppid | grep -e "[zZ]" | awk "{print $2}")');
+        } catch(error) {
+            logger.error('Final cleanup error', error);
+        }
+
+        logger.info('Cleanup complete');
         process.exit(0);
     });
 
     // Force shutdown after 30 seconds
     setTimeout(() => {
-        console.log('Forcing shutdown after timeout');
+        logger.info('Forcing shutdown after timeout');
+        try {
+            execSync('pkill -f "(chrome|chromium)"');
+        } catch(error) {
+            logger.error('Force cleanup error', error);
+        }
         process.exit(1);
     }, 30000);
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Initialize and start server
+const startServer = async () => {
+    try {
+        // Initialize directories
+        await initializeDirectories();
+
+        // Initial cleanup
+        try {
+            await killChromiumProcesses();
+            // Wait a moment for processes to fully terminate
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch(error) {
+            logger.error('Initial cleanup error', error);
+        }
+
+        // Start the server
+        const server = app.listen(config.server.port, () => {
+            logger.info('Server started', {
+                host: config.server.host,
+                port: config.server.port,
+                environment: process.env.NODE_ENV,
+                maxBrowserInstances: config.browser.maxInstances,
+                viewport: `${config.viewport.width}x${config.viewport.height}`
+            });
+        });
+
+        // Setup global error handlers
+        setupProcessErrorHandlers();  // Add this line here
+
+        // Handle server errors
+        server.on('error', (error) => {
+            logger.error('Server error', error);
+            process.exit(1);
+        });
+
+        return server;
+    } catch(error) {
+        logger.error('Failed to start server', error);
+        process.exit(1);
+    }
+};
+
+// Start the server
+(async () => {
+    try {
+        const server = await startServer();
+    } catch(error) {
+        logger.error('Fatal error during startup', error);
+        process.exit(1);
+    }
+})();

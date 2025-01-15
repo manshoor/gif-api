@@ -7,6 +7,9 @@ endif
 build:
 	docker-compose up --build --remove-orphans
 
+# build-no-cache:
+# 	docker-compose up build --remove-orphans --no-cache app
+
 build-prod:
 	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up --build --remove-orphans
 
@@ -17,22 +20,22 @@ up-d:
 	docker-compose up -d
 
 up-d-prod:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	docker-compose -f docker-compose.yml up -d
 
 up-d-prod-build:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
+	docker-compose -f docker-compose.yml up -d --build --remove-orphans
 
 up-d-prod-build-node:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps --build --remove-orphans node-app
+	docker-compose -f docker-compose.yml up -d --no-deps --build --remove-orphans app
 
 up-d-prod-build-node-force:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate --no-deps --build --remove-orphans node-app
+	docker-compose -f docker-compose.yml up -d --force-recreate --no-deps --build --remove-orphans app
 
 prod-push-node:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml push node-app
+	docker-compose -f docker-compose.yml push app
 
 prod-pull-node:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml pull node-app
+	docker-compose -f docker-compose.yml pull app
 
 down:
 	docker-compose down
@@ -56,7 +59,7 @@ images:
 	docker images -a
 
 monitor-node:
-	docker-compose logs -f -t node-app
+	docker-compose logs -f -t app
 
 monitor-redis:
 	docker-compose logs -f -t redis
@@ -69,3 +72,25 @@ clean-up-deep:
 
 prune-force:
 	docker system prune -a -f; docker volume prune --force; docker image prune --force; docker container prune --force; docker volume prune -f;
+
+# Add these to your Makefile
+check-chrome:
+	ps aux | grep -i chrom | grep -v grep
+
+kill-chrome:
+	pkill -f "chromium" || true
+	pkill -f "chrome" || true
+	pkill -f "Chrome" || true
+
+kill-node:
+	pkill -f "node" || true
+
+cleanup-all: kill-chrome kill-node
+	docker-compose down
+	docker system prune -f
+	docker volume prune -f
+
+clean-zombies:
+	pkill -9 -f "chrome_crashpad"
+	pkill -9 -f "chromium"
+	for pid in $$(ps -A -ostat,ppid | grep -e '[zZ]' | awk '{print $$2}'); do kill -9 $$pid; done
