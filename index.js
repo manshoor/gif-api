@@ -355,7 +355,7 @@ const createBrowserInstance = async () => {
             '--disable-backgrounding-occluded-windows',
             '--disable-ipc-flooding-protection',
             '--start-maximized', // Start in maximized state
-            `--window-size=${config.viewport.width + 50},${config.viewport.height + 120}`,
+            `--window-size=${config.viewport.width},${config.viewport.height + 120}`,
             '--no-zygote',
             '--single-process',
             '--disable-crashpad',
