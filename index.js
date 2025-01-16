@@ -354,7 +354,8 @@ const createBrowserInstance = async () => {
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--disable-ipc-flooding-protection',
-            `--window-size=${config.viewport.width},${config.viewport.height}`,
+            '--start-maximized', // Start in maximized state
+            `--window-size=${config.viewport.width + 50},${config.viewport.height + 120}`,
             '--no-zygote',
             '--single-process',
             '--disable-crashpad',
@@ -364,11 +365,13 @@ const createBrowserInstance = async () => {
             '--disable-features=site-per-process',
             '--disable-features=IsolateOrigins',
             '--disable-site-isolation-trials',
-            '--autoplay-policy=no-user-gesture-required',
              '--no-crash-upload', // Prevent crash reporter
-            '--disable-crash-reporter', // Disable crash reporter
             '--disable-breakpad', // Disable crash reporting
             '--disable-features=CrashpadReporter,CrashReporter',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-gpu-memory-buffer-video-frames',
         ]
     });
 
@@ -936,7 +939,8 @@ app.post('/create-video', async (req, res) => {
 
         await page.setViewport({
             width: config.viewport.width,
-            height: config.viewport.height
+            height: config.viewport.height,
+            deviceScaleFactor: 1
         });
 
         // Navigate to URL with retry logic

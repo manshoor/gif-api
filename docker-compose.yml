@@ -23,6 +23,12 @@ services:
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
       - REDIS_URL=redis
       - PUPPETEER_DISABLE_CRASHPAD=true
+      - DBUS_SESSION_BUS_ADDRESS=/dev/null
+      - PULSE_SERVER=/dev/null
+    tmpfs:
+      - /tmp
+      - /run
+      - /run/lock
     restart: unless-stopped
     deploy:
       resources:

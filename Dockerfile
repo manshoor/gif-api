@@ -13,6 +13,10 @@ ENV CI=true
 
 # Install required dependencies including canvas dependencies
 RUN apt-get update && apt-get install -y \
+    dbus \
+    dbus-x11 \
+    alsa-utils \
+    libasound2 \
     chromium \
     fonts-ipafont-gothic \
     fonts-wqy-zenhei \
@@ -62,6 +66,12 @@ COPY package*.json ./
 # Install dependencies
 #RUN npm install --omit=dev
 RUN npm install -g npm@10.2.4
+
+# Development dependencies
+#RUN npm install --global nodemon
+#RUN npm install && npm cache clean --force
+
+# Production dependencies
 RUN npm i --only=production && npm cache clean --force
 
 
@@ -79,4 +89,7 @@ USER node
 EXPOSE 3000
 
 # Start the application
+# Development command
+#CMD [ "npm", "run", "dev" ]
+# Production command
 CMD [ "npm", "run", "start" ]
