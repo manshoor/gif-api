@@ -35,8 +35,8 @@ const config = {
         host: process.env.HOST || 'localhost'
     },
     viewport: {
-        width: parseInt(process.env.VIEWPORT_WIDTH) || 2048,
-        height: parseInt(process.env.VIEWPORT_HEIGHT) || 1024
+        width: parseInt(process.env.VIEWPORT_WIDTH) || 1920,
+        height: parseInt(process.env.VIEWPORT_HEIGHT) || 1080
     },
     screenshot: {
         delay: parseFloat(process.env.SCREENSHOT_DELAY) || 3.5,
@@ -341,6 +341,12 @@ const createBrowserInstance = async () => {
         timeout: parseInt(process.env.BROWSER_LAUNCH_TIMEOUT) || 60000,
         pipe: true, // Use pipe instead of WebSocket
         dumpio: true, // Log browser process stdout and stderr
+        env: {
+            ...process.env,
+            // Add environment variables for Chromium
+            // This is required for running in Docker
+            DISABLE_CRASHPAD: "true"
+        },
         args: [
             '--ignore-certificate-errors',
             '--ignore-certificate-errors-skip-list',
@@ -372,6 +378,12 @@ const createBrowserInstance = async () => {
             '--no-first-run',
             '--no-default-browser-check',
             '--disable-gpu-memory-buffer-video-frames',
+            //
+            '--disable-dbus',
+            '--disable-features=VizDisplayCompositor',
+            '--disable-features=AudioServiceOutOfProcess',
+            '--no-experiments',
+            '--mute-audio'
         ]
     });
 
@@ -849,11 +861,12 @@ async function generateOutput(sessionDir, outputPath, fps, format) {
         // Different commands for different formats
         const ffmpegCommands = {
             gif: `ffmpeg -y -framerate ${fps} -i ${sessionDir}/frame_%06d.jpg `
-                + `-vf "fps=${fps},scale=${width}:-1:flags=lanczos,split[s0][s1];`
-                + `[s0]palettegen=max_colors=256:stats_mode=diff[p];`
-                + `[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" `
+        + `-vf "fps=${fps},scale=960:540:force_original_aspect_ratio=decrease,pad=960:540:(ow-iw)/2:(oh-ih)/2,split[s0][s1];`
+        + `[s0]palettegen=max_colors=128:stats_mode=diff[p];`
+        + `[s1][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" `
                 + `-f gif ${outputPath}`,
             mp4: `ffmpeg -y -framerate ${fps} -i ${sessionDir}/frame_%06d.jpg `
+        + `-vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" `
                 + `-c:v libx264 -preset medium -crf 23 -movflags +faststart `
                 + `-pix_fmt yuv420p ${outputPath}`
         };
@@ -905,7 +918,7 @@ app.post('/create-video', async (req, res) => {
         duration,
         sessionId,
         correlationId: req.correlationId
-    });
+        });
 
     if(!url || !validateUrl(url)) {
         return res.status(400).json({error: 'Valid URL is required'});
@@ -1062,7 +1075,7 @@ app.post('/create-video', async (req, res) => {
             }
 
             if (page) {
-                try {
+        try {
                     await page.close().catch(() => {});
                 } catch (e) {
                     logger.error('Error closing page', e, { sessionId });
@@ -1089,10 +1102,9 @@ app.post('/create-video', async (req, res) => {
             }
             }
 
-            const cleanupDuration = (Date.now() - startTime) / 1000;
             logger.info('Cleanup completed', {
                 sessionId,
-                totalDuration: cleanupDuration
+                totalDuration: (Date.now() - startTime) / 1000
             });
         } catch(error) {
             logger.error('Error in cleanup', error, {

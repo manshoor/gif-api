@@ -4,9 +4,12 @@ services:
     cap_add:
       - SYS_ADMIN  # This helps with Chrome's sandbox
     ulimits:
-      core: 0 # This helps with Chrome's sandbox
+      core: 0
+      nofile:
+        soft: 65536
+        hard: 65536
     security_opt:
-      - seccomp=unconfined  # This helps with Chrome's sandbox
+      - seccomp=unconfined
     build: .
     container_name: screenshot-service
     env_file: .env
@@ -15,6 +18,7 @@ services:
     volumes:
       - ./temp_screenshots:/usr/src/app/temp_screenshots
       - ./public/gifs:/usr/src/app/public/gifs
+      - /dev/shm:/dev/shm
     depends_on:
       redis:
         condition: service_healthy
@@ -23,8 +27,12 @@ services:
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
       - REDIS_URL=redis
       - PUPPETEER_DISABLE_CRASHPAD=true
-      - DBUS_SESSION_BUS_ADDRESS=/dev/null
-      - PULSE_SERVER=/dev/null
+      - CHROME_LAUNCH_ARGS=--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--no-sandbox,--disable-dev-shm-usage
+      - PUPPETEER_SKIP_CHROME_HEADLESS_SHELL=true
+      - NO_PROXY=localhost,127.0.0.1
+      - PULSEAUDIO_SERVER=dummy
+      - ALSA_CARD=none
+      - AUDIO_DRIVER=null
     tmpfs:
       - /tmp
       - /run

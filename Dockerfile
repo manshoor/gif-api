@@ -15,6 +15,7 @@ ENV CI=true
 RUN apt-get update && apt-get install -y \
     dbus \
     dbus-x11 \
+    pulseaudio \
     alsa-utils \
     libasound2 \
     chromium \
@@ -34,7 +35,6 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     libcups2 \
     libxrandr2 \
-    libasound2 \
     libatk1.0-0 \
     libgtk-3-0 \
     libnspr4 \
