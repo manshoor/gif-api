@@ -1,6 +1,5 @@
 node_modules
 npm-debug.log
-temp_screenshots/*
 public/gifs/*
 .git
 .gitignore
@@ -10,3 +9,9 @@ public/gifs/*
 coverage
 .nyc_output
 *.log
+Dockerfile
+.dockerignore
+README.md
+temp/*
+docker-compose*.yml
+Makefile

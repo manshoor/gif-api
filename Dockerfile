@@ -3,6 +3,7 @@ FROM node:18-bullseye-slim
 # Set environment variables
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV CHROME_PATH=/usr/bin/chromium
 ENV NODE_ENV=production
 ENV PUPPETEER_HEADLESS=new
 # Add explicit sandbox configuration
@@ -12,7 +13,10 @@ ENV CI=true
 
 
 # Install required dependencies including canvas dependencies
-RUN apt-get update && apt-get install -y \
+RUN mkdir -p /var/run/dbus && \
+    mkdir -p /var/run/chrome && \
+    chown -R node:node /var/run/chrome && \
+    apt-get update && apt-get install -y \
     dbus \
     dbus-x11 \
     pulseaudio \
@@ -40,15 +44,6 @@ RUN apt-get update && apt-get install -y \
     libnspr4 \
     libxss1 \
     libnss3 \
-    # Canvas dependencies
-    build-essential \
-    libcairo2-dev \
-    libpango1.0-dev \
-    libjpeg-dev \
-    libgif-dev \
-    librsvg2-dev \
-    pkg-config \
-    python3 \
     # Additional utilities
     procps \
     wget \
@@ -79,7 +74,7 @@ RUN npm i --only=production && npm cache clean --force
 COPY . .
 
 # Create necessary directories with proper permissions
-RUN mkdir -p temp_screenshots public/gifs \
+RUN mkdir -p public/screenshots public/gifs \
     && chown -R node:node /usr/src/app
 
 # Switch to non-root user

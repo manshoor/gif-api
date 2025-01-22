@@ -1,5 +1,6 @@
 services:
   app:
+    image: manshooras/screenshot-service:latest
     init: true  # Add this to handle zombie processes better
     cap_add:
       - SYS_ADMIN  # This helps with Chrome's sandbox
@@ -16,7 +17,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./temp_screenshots:/usr/src/app/temp_screenshots
+      - ./public/screenshots:/usr/src/app/public/screenshots
       - ./public/gifs:/usr/src/app/public/gifs
       - /dev/shm:/dev/shm
     depends_on:
@@ -29,7 +30,6 @@ services:
       - PUPPETEER_DISABLE_CRASHPAD=true
       - CHROME_LAUNCH_ARGS=--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--no-sandbox,--disable-dev-shm-usage
       - PUPPETEER_SKIP_CHROME_HEADLESS_SHELL=true
-      - NO_PROXY=localhost,127.0.0.1
       - PULSEAUDIO_SERVER=dummy
       - ALSA_CARD=none
       - AUDIO_DRIVER=null

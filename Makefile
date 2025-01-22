@@ -7,8 +7,8 @@ endif
 build:
 	docker-compose up --build --remove-orphans
 
-# build-no-cache:
-# 	docker-compose up build --remove-orphans --no-cache app
+no-cache-build:
+	docker-compose build --no-cache app
 
 build-prod:
 	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up --build --remove-orphans
@@ -36,6 +36,15 @@ prod-push-node:
 
 prod-pull-node:
 	docker-compose -f docker-compose.yml pull app
+
+build-image:
+	docker build -t manshooras/screenshot-service:latest .
+
+push-image:
+	docker push manshooras/screenshot-service:latest
+
+pull-image:
+	docker pull manshooras/screenshot-service:latest
 
 down:
 	docker-compose down
