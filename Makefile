@@ -61,6 +61,20 @@ monitor-all:
 dps:
 	docker ps -a
 
+setup-permissions:
+	mkdir -p public/screenshots public/gifs temp
+	chmod -R 755 public temp
+	chown -R 1000:1000 public temp
+
+build-with-permissions: setup-permissions
+	docker-compose build --no-cache app
+
+up-with-permissions: setup-permissions
+	docker-compose up -d
+
+deploy: setup-permissions pull-image
+	docker-compose up -d
+
 dcps:
 	docker-compose ps -a
 

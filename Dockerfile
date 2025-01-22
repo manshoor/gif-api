@@ -73,9 +73,12 @@ RUN npm i --only=production && npm cache clean --force
 # Copy app source
 COPY . .
 
-# Create necessary directories with proper permissions
-RUN mkdir -p public/screenshots public/gifs \
-    && chown -R node:node /usr/src/app
+# Create directories and set permissions
+RUN mkdir -p public/screenshots public/gifs temp && \
+    chown -R node:node /usr/src/app && \
+    chown -R node:node /var/run/chrome && \
+    chmod -R 755 public && \
+    chmod -R 755 temp
 
 # Switch to non-root user
 USER node

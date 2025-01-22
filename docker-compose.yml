@@ -17,8 +17,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./public/screenshots:/usr/src/app/public/screenshots
-      - ./public/gifs:/usr/src/app/public/gifs
+      - ./public:/usr/src/app/public
       - /dev/shm:/dev/shm
     depends_on:
       redis:
