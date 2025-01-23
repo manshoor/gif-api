@@ -4,6 +4,7 @@ services:
     init: true  # Add this to handle zombie processes better
     cap_add:
       - SYS_ADMIN  # This helps with Chrome's sandbox
+    shm_size: '2gb'
     ulimits:
       core: 0
       nofile:
@@ -27,7 +28,7 @@ services:
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
       - REDIS_URL=redis
       - PUPPETEER_DISABLE_CRASHPAD=true
-      - CHROME_LAUNCH_ARGS=--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--no-sandbox,--disable-dev-shm-usage
+      - CHROME_LAUNCH_ARGS=--disable-http2,--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--no-sandbox,--disable-dev-shm-usage
       - PUPPETEER_SKIP_CHROME_HEADLESS_SHELL=true
       - PULSEAUDIO_SERVER=dummy
       - ALSA_CARD=none

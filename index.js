@@ -7,26 +7,8 @@ const path = require('path');
 const crypto = require('crypto');
 const {exec, execSync} = require('child_process');
 const cors = require('cors');
+const UserAgent = require('user-agents');
 
-// Debug logging
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', {
-        promise,
-        reason: reason instanceof Error ? {
-            message: reason.message,
-            stack: reason.stack,
-            ...reason
-        } : reason
-    });
-});
-
-process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
-    // Don't exit the process here, just log
-});
-
-
-// Load configuration from environment variables
 const config = {
     server: {
         port: parseInt(process.env.PORT) || 3000,
@@ -352,57 +334,89 @@ const createBrowserInstance = async () => {
         handleSIGTERM: true,
         handleSIGHUP: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-        timeout: parseInt(process.env.BROWSER_LAUNCH_TIMEOUT) || 30000,
+        timeout: parseInt(process.env.BROWSER_LAUNCH_TIMEOUT) || 60000, // Increased timeout
         pipe: true,
         dumpio: true,
         env: {
             ...process.env,
             DISABLE_CRASHPAD: "true",
             DBUS_SESSION_BUS_ADDRESS: '/dev/null',
-            NO_PROXY: 'localhost,127.0.0.1'
+            NO_PROXY: 'localhost,127.0.0.1',
+            CHROMIUM_FLAGS: '--disable-gpu',
+            LANGUAGE: 'en-US,en'
         },
         args: [
+            '--user-agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.198 Safari/537.36"',
             '--ignore-certificate-errors',
             '--ignore-certificate-errors-skip-list',
             '--autoplay-policy=user-gesture-required',
-            '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
+            '--no-sandbox',
             '--disable-gpu',
-            '--disable-extensions',
-            '--disable-background-networking',
             '--disable-background-timer-throttling',
+            '--disable-client-side-phishing-detection',
             '--disable-backgrounding-occluded-windows',
+            '--enable-automation',
             '--disable-ipc-flooding-protection',
             '--start-maximized', // Start in maximized state
+            '--proxy-server="direct://"',
+            '--proxy-bypass-list=*',
             `--window-size=${config.viewport.width},${config.viewport.height + 120}`,
             '--no-zygote',
             '--single-process',
-            '--disable-crashpad',
-            '--disable-crash-reporter',
-            '--disable-features=CrashpadReporter',
             '--disable-web-security',
             '--disable-features=site-per-process',
             '--disable-features=IsolateOrigins',
             '--disable-site-isolation-trials',
-            '--no-crash-upload', // Prevent crash reporter
-            '--disable-breakpad', // Disable crash reporting
-            '--disable-features=CrashpadReporter,CrashReporter',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-default-browser-check',
             '--disable-gpu-memory-buffer-video-frames',
             //
             '--disable-dbus',
             '--disable-features=VizDisplayCompositor',
             '--disable-features=AudioServiceOutOfProcess',
-            '--no-experiments',
-            '--mute-audio',
             //
-            '--metrics-recording-only',
             '--disable-notifications',
             '--disable-features=IsolateOrigins,site-per-process,AudioServiceOutOfProcess',
-            '--font-render-hinting=none'
+            '--font-render-hinting=none',
+            // Network-specific flags
+            '--disable-http2', // Disable HTTP/2 to prevent protocol errors
+            '--disable-background-networking',
+            '--disable-default-apps',
+            '--disable-extensions',
+            '--disable-sync',
+            '--disable-translate',
+            '--metrics-recording-only',
+            '--no-first-run',
+            '--safebrowsing-disable-auto-update',
+            // Memory and process flags
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--disable-features=ScriptStreaming',
+            '--js-flags="--max-old-space-size=512"',
+            '--disable-gpu-sandbox',
+            '--disable-software-rasterizer',
+            '--no-default-browser-check',
+            '--no-experiments',
+            '--single-process', // Use single process to avoid complications
+            // Window and rendering flags
+            '--hide-scrollbars',
+            '--mute-audio',
+            // Error reporting and crash handling
+            '--disable-crashpad',
+            '--disable-crash-reporter',
+            '--disable-features=CrashpadReporter,CrashReporter',
+            '--disable-breakpad',
+            '--no-crash-upload',
+            // webcrt flags
+            '--disable-webrtc-hw-encoding',
+            '--disable-webrtc-hw-decoding',
+            '--disable-webrtc-multiple-routes',
+            '--disable-webrtc-hw-vp8-encoding',
+            // Add TLS 1.3 support
+            '--enable-features=NetworkService,NetworkServiceInProcess',
+            '--disable-features=TranslateUI',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-device-discovery-notifications',
+            '--disable-session-crashed-bubble'
         ]
     });
 
@@ -822,6 +836,9 @@ app.post('/create-video', async (req, res) => {
             deviceScaleFactor: 1
         });
 
+        // Configure stealth settings
+        await configurePageForStealth(page);
+
         // Navigate to URL with retry logic
         await withRetry(async () => {
             await page.goto(url, {
@@ -981,83 +998,288 @@ app.post('/create-video', async (req, res) => {
     }
 });
 
-// Navigation helper function
-const navigateToPage = async (page, url) => {
-    // Setup request interception
-    await page.setRequestInterception(true);
-    page.removeAllListeners('request');
+// Modern browser profiles based on real-world data
+const browserProfiles = [
+    {
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+        platform: 'macOS',
+        vendor: 'Google Inc.'
+    },
+    {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+        platform: 'Windows',
+        vendor: 'Google Inc.'
+    },
+    {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+        viewport: { width: 1920, height: 1080 },
+        platform: 'Windows',
+        vendor: 'Google Inc.'
+    }
+];
 
-    // Define blocked resource types
-    const blockedResourceTypes = [
-        'media', 'websocket', 'manifest', 'other',
-        'texttrack', 'object', 'beacon', 'csp_report', 'imageset'
-    ];
+const configurePageForStealth = async (page) => {
+    const profile = browserProfiles[Math.floor(Math.random() * browserProfiles.length)];
 
-    // Define blocked URL patterns
-    const blockedUrls = [
-        'google-analytics', 'googletagmanager', 'doubleclick',
-        'facebook', 'hotjar', 'optimizely', 'googleads'
-    ];
+    // Configure page properties
+    await page.setJavaScriptEnabled(true);
+    await page.setDefaultNavigationTimeout(90000);
 
-    page.on('request', request => {
-        const resourceType = request.resourceType();
-        const url = request.url().toLowerCase();
+    const headers = {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0',
+        'sec-ch-ua': '"Chromium";v="121", "Not A(Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'DNT': '1'
+    };
 
-        // Always allow essential resources
-        if (resourceType === 'document' ||
-            resourceType === 'stylesheet' ||
-            resourceType === 'image' ||
-            resourceType === 'script' ||
-            resourceType === 'font' ||
-            resourceType === 'xhr' ||
-            resourceType === 'fetch') {
-            request.continue();
-            return;
-        }
+    await page.setExtraHTTPHeaders(headers);
+    await page.setUserAgent(profile.userAgent);
 
-        // Block known analytics and non-essential resources
-        if (blockedResourceTypes.includes(resourceType) ||
-            blockedUrls.some(pattern => url.includes(pattern))) {
-            request.abort();
-            return;
-        }
+    // WebGL vendor and renderer
+    await page.evaluateOnNewDocument(() => {
+        // WebGL
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function (parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+            return getParameter.apply(this, arguments);
+        };
 
-        // Handle scripts - allow essential ones
-        if (resourceType === 'script') {
-            if (url.includes('jquery') || url.includes('cdn') || url.includes(new URL(url).hostname)) {
-                request.continue();
-            } else {
-                request.abort();
+        // Notifications
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({state: Notification.permission}) :
+                originalQuery(parameters)
+        );
+
+        // Fix plugins
+        Object.defineProperty(navigator, 'plugins', {
+            get: function () {
+                return [
+                    {
+                        0: {
+                            type: "application/x-google-chrome-pdf",
+                            suffixes: "pdf",
+                            description: "Portable Document Format"
+                        },
+                        description: "Portable Document Format",
+                        filename: "internal-pdf-viewer",
+                        length: 1,
+                        name: "Chrome PDF Plugin"
+                    }
+                ];
             }
-            return;
-        }
-
-        // Continue by default
-        request.continue();
-    });
-
-    try {
-        // Set navigation timeout
-        await page.setDefaultNavigationTimeout(30000);
-
-        // Navigate with optimized settings
-        const response = await page.goto(url, {
-            waitUntil: ['domcontentloaded', 'networkidle2'],
-            timeout: 30000
         });
 
-        if (!response || !response.ok()) {
-            throw new Error(`Navigation failed with status: ${response?.status() || 'unknown'}`);
+        // Fix languages
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
+        });
+
+        // Fix platform
+        Object.defineProperty(navigator, 'platform', {
+            get: () => 'Win32'
+        });
+
+        // Fix Chrome runtime
+        window.chrome = {
+            runtime: {},
+            loadTimes: () => {
+            },
+            csi: () => {
+            },
+            app: {}
+        };
+
+        // Hide webdriver
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => false
+        });
+
+        // Hide automation
+        Object.defineProperty(navigator, 'automation', {
+            get: () => false
+        });
+
+        // Clean up storage
+        localStorage.clear();
+        sessionStorage.clear();
+    });
+
+    // Set viewport with correct color depth
+    await page.setViewport({
+        width: profile.viewport.width,
+        height: profile.viewport.height,
+        deviceScaleFactor: 1,
+        hasTouch: false,
+        isLandscape: true,
+        isMobile: false
+    });
+
+    return profile;
+};
+// Navigation helper function
+const navigateToPage = async (page, url, maxRetries = 3) => {
+    try {
+        // Configure stealth settings
+        await configurePageForStealth(page);
+
+        // Set timeouts
+        page.setDefaultNavigationTimeout(90000);
+        page.setDefaultTimeout(90000);
+
+        // Enable request interception
+        await page.setRequestInterception(true);
+
+            // Clear previous listeners
+        page.removeAllListeners('request');
+
+        // Handle requests
+        page.on('request', async (request) => {
+            try {
+                const resourceType = request.resourceType();
+                const requestUrl = request.url().toLowerCase();
+
+                // Essential resources
+                if(['document', 'stylesheet', 'image', 'font'].includes(resourceType)) {
+                    await request.continue();
+                    return;
+                }
+
+                // Block unneeded resource types
+                if(['media',
+                    'websocket',
+                    'manifest',
+                    'texttrack',
+                    'object',
+                    'beacon',
+                    'csp_report',
+                    'crypto',
+                    'imageset'].includes(resourceType)) {
+                    await request.abort();
+                    return;
+                }
+
+                // Block tracking and analytics
+                if(requestUrl.includes('google-analytics') ||
+                    requestUrl.includes('doubleclick') ||
+                    requestUrl.includes('facebook') ||
+                    requestUrl.includes('analytics') ||
+                    requestUrl.includes('tracking') ||
+                     resourceType === 'media' ||
+                     resourceType === 'websocket' ||
+                    requestUrl.includes('metrix')) {
+                    await request.abort();
+                    return;
+                }
+
+                // Allow essential resources
+                if(['stylesheet', 'image', 'font'].includes(resourceType)) {
+                    await request.continue();
+                    return;
+                }
+
+                // Handle scripts
+                if(resourceType === 'script') {
+                    if(requestUrl.includes('jquery') ||
+                        requestUrl.includes('cdn') ||
+                        requestUrl.includes(new URL(url).hostname)) {
+                        await request.continue();
+                    } else {
+                        await request.abort();
+                    }
+                    return;
+                }
+
+                // Default behavior
+                await request.continue();
+            } catch(error) {
+                if(!error.message.includes('Request is already handled')) {
+                    logger.error('Request handling error:', {
+                        url: request.url(),
+                        type: request.resourceType(),
+                        error: error.message
+                    });
+                }
+            }
+        });
+        await page.evaluateOnNewDocument(async () => {
+            // Add a small delay to let Cloudflare's JS execute
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            await sleep(Math.floor(Math.random() * 1000) + 2000);
+        });
+        // Navigation retry loop
+        for(let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const response = await page.goto(url, {
+                    waitUntil: ['domcontentloaded', 'networkidle2'],
+                    timeout: 60000
+                });
+
+                if(!response) {
+                    throw new Error('No response received');
+                }
+
+                if(!response.ok()) {
+                    throw new Error(`Server error: ${response.status()} ${response.statusText()}`);
+                }
+
+                // Wait for any dynamic content
+                await delay(3000);
+
+                // Check for bot detection elements
+                const botDetection = await page.evaluate(() => {
+                    const elements = document.querySelectorAll('*');
+                    for(const el of elements) {
+                        if(el.textContent && el.textContent.toLowerCase().includes('detected automated')) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+
+                if(botDetection) {
+                    throw new Error('Bot detection encountered');
+                }
+
+                return response;
+
+            } catch(error) {
+                logger.error(`Navigation attempt ${attempt} failed:`, {
+                    error: error.message,
+                    url,
+                    attempt
+                });
+
+                if(attempt === maxRetries) {
+                    throw error;
+                }
+
+                // Clear session data before retry
+                const client = await page.target().createCDPSession();
+                await Promise.all([
+                    client.send('Network.clearBrowserCookies'),
+                    client.send('Network.clearBrowserCache')
+                ]);
+
+                // Exponential backoff using the delay function
+                await delay(Math.pow(2, attempt) * 1000);
+            }
         }
-
-        // Wait for page to stabilize using evaluate
-        await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 2000)));
-
-        // Navigation successful
-        return response;
-
-    } catch (error) {
-        logger.error('Navigation failed', { error: error.message });
+    } catch(error) {
+        logger.error('Navigation failed:', {
+            error: error.message,
+            url
+        });
         throw error;
     }
 };
@@ -1067,7 +1289,8 @@ const waitForContent = async (page) => {
     try {
         // Wait for all images in viewport to load
         await page.evaluate(async () => {
-            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            // Define delay function inside evaluate context
+            const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
             // Function to scroll and wait
             const scrollAndWait = async () => {
@@ -1076,12 +1299,12 @@ const waitForContent = async (page) => {
                 let lastScroll = window.pageYOffset;
 
                 // Scroll in chunks
-                for (let i = 0; i < scrollHeight; i += viewportHeight) {
+                for(let i = 0; i < scrollHeight; i += viewportHeight) {
                     window.scrollTo(0, i);
                     await delay(100);
 
                     // Check if we've stopped scrolling
-                    if (window.pageYOffset === lastScroll) {
+                    if(window.pageYOffset === lastScroll) {
                         break;
                     }
                     lastScroll = window.pageYOffset;
@@ -1092,14 +1315,14 @@ const waitForContent = async (page) => {
                 await delay(500);
             };
 
-            // First scroll pass to trigger lazy loading
+            // Perform initial scroll
             await scrollAndWait();
 
             // Wait for images to load
             const images = Array.from(document.getElementsByTagName('img'));
             await Promise.all(
                 images.map(img => {
-                    if (img.complete) return Promise.resolve();
+                    if(img.complete) return Promise.resolve();
                     return new Promise(resolve => {
                         const loadHandler = () => {
                             img.removeEventListener('load', loadHandler);
@@ -1113,8 +1336,7 @@ const waitForContent = async (page) => {
                         };
                         img.addEventListener('load', loadHandler);
                         img.addEventListener('error', errorHandler);
-                        // Timeout after 5 seconds
-                        setTimeout(resolve, 5000);
+                        setTimeout(resolve, 5000); // Timeout after 5 seconds
                     });
                 })
             );
@@ -1126,11 +1348,18 @@ const waitForContent = async (page) => {
             await delay(1000);
         });
 
-    } catch (error) {
-        logger.error('Error waiting for content', { error: error.message });
-        // Continue despite errors - we don't want to block the screenshot
+        // Add a final delay outside evaluate context
+        await delay(2000);
+
+    } catch(error) {
+        logger.error('Error waiting for content', {
+            error: error.message,
+            stack: error.stack
+        });
+        // Continue despite errors to avoid blocking screenshot
     }
 };
+
 
 // Screenshot endpoint
 app.post('/create-screenshot', validateApiKey, async (req, res) => {
