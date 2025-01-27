@@ -5,8 +5,8 @@ services:
     image: nginx:stable-alpine
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "3000:80"
+      - "8443:443"
     logging:
       driver: "json-file"
       options:
@@ -37,8 +37,8 @@ services:
     build: .
 #    container_name: screenshot-service
     env_file: .env
-    ports:
-      - "3000:3000"
+#    ports:
+#      - "3000:3000"
     volumes:
       - .:/usr/src/app
       - ./public:/usr/src/app/public
