@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon --verbose index.js",
+    "dev": "nodemon --verbose --legacy-watch index.js",
     "dev-old": "nodemon --expose-gc index.js",
     "dev-new": "DEBUG=puppeteer:* nodemon --expose-gc index-new.js"
   },
@@ -15,9 +15,9 @@
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
+    "morgan": "1.10.0",
     "puppeteer": "^23.11.1",
     "puppeteer-core": "^23.11.1",
     "redis": "^4.7.0",

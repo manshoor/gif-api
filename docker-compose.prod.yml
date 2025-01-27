@@ -1,0 +1,90 @@
+services:
+  nginx:
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx/:/var/log/nginx
+    user: root  # Explicit user
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+      update_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  app:
+    deploy:
+      replicas: 3
+      restart_policy:
+        condition: any
+      update_config:
+        parallelism: 2
+        delay: 15s
+      resources:
+        limits:
+          cpus: '2'
+          memory: 3G
+    build:
+      context: ./
+      dockerfile: Dockerfile.Prod
+      args:
+        - NODE_ENV=production
+        - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+      - REDIS_URL=redis
+      - PUPPETEER_DISABLE_CRASHPAD=true
+      - CHROME_LAUNCH_ARGS=--disable-http2,--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--no-sandbox,--disable-dev-shm-usage
+      - PUPPETEER_SKIP_CHROME_HEADLESS_SHELL=true
+      - PULSEAUDIO_SERVER=dummy
+      - ALSA_CARD=none
+      - AUDIO_DRIVER=null
+      - DBUS_SESSION_BUS_ADDRESS=/dev/null
+      - DISABLE_CRASHPAD=true
+      - CHROMIUM_FLAGS=--disable-gpu,--no-sandbox,--disable-dev-shm-usage
+    volumes:
+      - ./logs/node:/usr/src/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    volumes:
+      - redis-data:/data
+      - ./logs/redis:/var/log/redis:rw
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  redis-data:
+
+networks:
+  default:
+    driver: overlay

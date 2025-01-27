@@ -1,0 +1,7 @@
+{
+  "verbose": true,
+  "watch": ["./"],
+  "ext": "js,json,env",
+  "ignore": ["node_modules/*", "public/*", "temp/*"],
+  "exec": "node index.js"
+}

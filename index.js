@@ -1,6 +1,6 @@
-require('dotenv').config();
 const express = require('express');
 const puppeteer = require('puppeteer');
+const morgan = require('morgan');
 const fsPromises = require('fs').promises;
 const fs = require('fs');
 const path = require('path');
@@ -73,6 +73,25 @@ const app = express();
 const rateLimits = new Map();
 let activeBrowsers = new Set();
 
+// Set up logging directory
+const logDirectory = path.join(__dirname, 'logs');
+if (!fs.existsSync(logDirectory)) {
+    fs.mkdirSync(logDirectory);
+}
+
+// Create write streams for logging
+const accessLogStream = fs.createWriteStream(path.join(logDirectory, 'access.log'), { flags: 'a' });
+const errorLogStream = fs.createWriteStream(path.join(logDirectory, 'error.log'), { flags: 'a' });
+
+// Use morgan for logging HTTP requests
+app.use(morgan('combined', { stream: accessLogStream }));
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    errorLogStream.write(`${new Date().toISOString()} - ${err.stack}\n`);
+    res.status(500).send('Something broke!');
+});
+
 const setupProcessErrorHandlers = () => {
     process.on('uncaughtException', (error) => {
         logger.error('Uncaught Exception:', error);
@@ -99,6 +118,14 @@ const logger = {
         console.log(JSON.stringify({
             timestamp: new Date().toISOString(),
             level: 'info',
+            message,
+            ...meta
+        }));
+    },
+    warn: (message, meta = {}) => { // Add this method
+        console.warn(JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: 'warn',
             message,
             ...meta
         }));
@@ -142,7 +169,7 @@ app.use(async (err, req, res, next) => {
 });
 
 // Helper Functions
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const validateUrl = (url) => {
     try {
@@ -318,7 +345,7 @@ const checkMemoryUsage = () => {
 const createBrowserInstance = async () => {
     // First, clean up any existing zombie processes
     try {
-        await execSync('pkill -f "chrome_crashpad" || true');
+        execSync('pkill -f "chrome_crashpad" || true');
     } catch (e) {
         logger.error('Error cleaning up crashpad processes:', e);
     }
@@ -336,13 +363,14 @@ const createBrowserInstance = async () => {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         timeout: parseInt(process.env.BROWSER_LAUNCH_TIMEOUT) || 60000, // Increased timeout
         pipe: true,
+        ignoreHTTPSErrors: true,
         dumpio: true,
         env: {
             ...process.env,
             DISABLE_CRASHPAD: "true",
             DBUS_SESSION_BUS_ADDRESS: '/dev/null',
             NO_PROXY: 'localhost,127.0.0.1',
-            CHROMIUM_FLAGS: '--disable-gpu',
+            CHROMIUM_FLAGS: '--disable-gpu,--no-sandbox,--disable-dev-shm-usage',
             LANGUAGE: 'en-US,en'
         },
         args: [
@@ -424,9 +452,8 @@ const createBrowserInstance = async () => {
     browser.on('disconnected', async () => {
         logger.info('Browser disconnected, cleaning up...');
         activeBrowsers.delete(browser);
-        logger.info('Browser disconnected, cleaning up resources');
         try {
-            await execSync('pkill -f "chrome_crashpad" || true');
+            execSync('pkill -f "chrome_crashpad" || true');
         } catch (e) {
             logger.error('Error cleaning up after browser disconnect:', e);
         }
@@ -780,8 +807,37 @@ async function generateOutput(sessionDir, outputPath, fps, format) {
     });
 }
 
+const scrollThroughPage = async (page) => {
+    await page.evaluate(async () => {
+        await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 100; // Scroll distance in pixels
+            const timer = setInterval(() => {
+                const scrollHeight = document.body.scrollHeight;
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+
+                // Stop scrolling when we reach the bottom of the page
+                if (totalHeight >= scrollHeight) {
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 100); // Scroll every 100ms
+        });
+    });
+};
+
+const setupUserAgent = async (page) => {
+    const userAgent = new UserAgent({deviceCategory: 'desktop'}).toString();
+    await page.setUserAgent(userAgent);
+    await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/',
+    });
+}
+
 // Create Video endpoint
-app.post('/create-video', async (req, res) => {
+app.post('/create-video', validateApiKey, async (req, res) => {
     const {url, duration = config.screenshot.defaultDuration, format = 'gif'} = req.body;
     const sessionId = crypto.randomBytes(16).toString('hex');
     const startTime = Date.now();
@@ -836,14 +892,14 @@ app.post('/create-video', async (req, res) => {
             deviceScaleFactor: 1
         });
 
-        // Configure stealth settings
-        await configurePageForStealth(page);
+        await setupUserAgent(page);
 
         // Navigate to URL with retry logic
         await withRetry(async () => {
             await page.goto(url, {
                 waitUntil: ['networkidle0', 'domcontentloaded'],
-                timeout: 30000
+                timeout: 30000,
+                ignoreHTTPSErrors: true // Ignore SSL errors
             });
 
             await delay(2000);
@@ -881,33 +937,24 @@ app.post('/create-video', async (req, res) => {
             sessionDir
         });
 
-        // Write frames to disk
-        let writtenFrames = 0;
-        await Promise.all(frames.map(async (frameData, index) => {
-            const framePath = path.join(sessionDir, `frame_${index.toString().padStart(6, '0')}.jpg`);
-            try {
+        // Write frames to disk in batches
+        const batchSize = 10;
+        for (let i = 0; i < frames.length; i += batchSize) {
+            const batch = frames.slice(i, i + batchSize);
+            await Promise.all(batch.map(async (frameData, index) => {
+                const framePath = path.join(sessionDir, `frame_${(i + index).toString().padStart(6, '0')}.jpg`);
                 await fsPromises.writeFile(framePath, frameData, 'base64');
-                writtenFrames++;
+            }));
 
-                if (writtenFrames % 10 === 0) {
                     logger.info('Frame writing progress', {
-                        writtenFrames,
+                writtenFrames: i + batch.length,
                         totalFrames: frames.length,
                         sessionId
                     });
                 }
-            } catch (error) {
-                logger.error('Error writing frame', {
-                    frameIndex: index,
-                    error,
-                    sessionId
-                });
-                throw error;
-            }
-        }));
 
         logger.info('Frame writing complete', {
-            writtenFrames,
+            writtenFrames: frames.length,
             totalFrames: frames.length,
             sessionId
         });
@@ -998,521 +1045,192 @@ app.post('/create-video', async (req, res) => {
     }
 });
 
-// Modern browser profiles based on real-world data
-const browserProfiles = [
-    {
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-        platform: 'macOS',
-        vendor: 'Google Inc.'
-    },
-    {
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
-        platform: 'Windows',
-        vendor: 'Google Inc.'
-    },
-    {
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-        viewport: { width: 1920, height: 1080 },
-        platform: 'Windows',
-        vendor: 'Google Inc.'
-    }
-];
 
-const configurePageForStealth = async (page) => {
-    const profile = browserProfiles[Math.floor(Math.random() * browserProfiles.length)];
-
-    // Configure page properties
-    await page.setJavaScriptEnabled(true);
-    await page.setDefaultNavigationTimeout(90000);
-
-    const headers = {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Cache-Control': 'max-age=0',
-        'sec-ch-ua': '"Chromium";v="121", "Not A(Brand";v="99"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
-        'DNT': '1'
-    };
-
-    await page.setExtraHTTPHeaders(headers);
-    await page.setUserAgent(profile.userAgent);
-
-    // WebGL vendor and renderer
-    await page.evaluateOnNewDocument(() => {
-        // WebGL
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function (parameter) {
-            if (parameter === 37445) return 'Intel Inc.';
-            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-            return getParameter.apply(this, arguments);
-        };
-
-        // Notifications
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications' ?
-                Promise.resolve({state: Notification.permission}) :
-                originalQuery(parameters)
-        );
-
-        // Fix plugins
-        Object.defineProperty(navigator, 'plugins', {
-            get: function () {
-                return [
-                    {
-                        0: {
-                            type: "application/x-google-chrome-pdf",
-                            suffixes: "pdf",
-                            description: "Portable Document Format"
-                        },
-                        description: "Portable Document Format",
-                        filename: "internal-pdf-viewer",
-                        length: 1,
-                        name: "Chrome PDF Plugin"
-                    }
-                ];
-            }
-        });
-
-        // Fix languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
-
-        // Fix platform
-        Object.defineProperty(navigator, 'platform', {
-            get: () => 'Win32'
-        });
-
-        // Fix Chrome runtime
-        window.chrome = {
-            runtime: {},
-            loadTimes: () => {
-            },
-            csi: () => {
-            },
-            app: {}
-        };
-
-        // Hide webdriver
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => false
-        });
-
-        // Hide automation
-        Object.defineProperty(navigator, 'automation', {
-            get: () => false
-        });
-
-        // Clean up storage
-        localStorage.clear();
-        sessionStorage.clear();
-    });
-
-    // Set viewport with correct color depth
-    await page.setViewport({
-        width: profile.viewport.width,
-        height: profile.viewport.height,
-        deviceScaleFactor: 1,
-        hasTouch: false,
-        isLandscape: true,
-        isMobile: false
-    });
-
-    return profile;
-};
-// Navigation helper function
-const navigateToPage = async (page, url, maxRetries = 3) => {
-    try {
-        // Configure stealth settings
-        await configurePageForStealth(page);
-
-        // Set timeouts
-        page.setDefaultNavigationTimeout(90000);
-        page.setDefaultTimeout(90000);
-
-        // Enable request interception
-        await page.setRequestInterception(true);
-
-            // Clear previous listeners
-        page.removeAllListeners('request');
-
-        // Handle requests
-        page.on('request', async (request) => {
-            try {
-                const resourceType = request.resourceType();
-                const requestUrl = request.url().toLowerCase();
-
-                // Essential resources
-                if(['document', 'stylesheet', 'image', 'font'].includes(resourceType)) {
-                    await request.continue();
-                    return;
-                }
-
-                // Block unneeded resource types
-                if(['media',
-                    'websocket',
-                    'manifest',
-                    'texttrack',
-                    'object',
-                    'beacon',
-                    'csp_report',
-                    'crypto',
-                    'imageset'].includes(resourceType)) {
-                    await request.abort();
-                    return;
-                }
-
-                // Block tracking and analytics
-                if(requestUrl.includes('google-analytics') ||
-                    requestUrl.includes('doubleclick') ||
-                    requestUrl.includes('facebook') ||
-                    requestUrl.includes('analytics') ||
-                    requestUrl.includes('tracking') ||
-                     resourceType === 'media' ||
-                     resourceType === 'websocket' ||
-                    requestUrl.includes('metrix')) {
-                    await request.abort();
-                    return;
-                }
-
-                // Allow essential resources
-                if(['stylesheet', 'image', 'font'].includes(resourceType)) {
-                    await request.continue();
-                    return;
-                }
-
-                // Handle scripts
-                if(resourceType === 'script') {
-                    if(requestUrl.includes('jquery') ||
-                        requestUrl.includes('cdn') ||
-                        requestUrl.includes(new URL(url).hostname)) {
-                        await request.continue();
-                    } else {
-                        await request.abort();
-                    }
-                    return;
-                }
-
-                // Default behavior
-                await request.continue();
-            } catch(error) {
-                if(!error.message.includes('Request is already handled')) {
-                    logger.error('Request handling error:', {
-                        url: request.url(),
-                        type: request.resourceType(),
-                        error: error.message
-                    });
-                }
-            }
-        });
-        await page.evaluateOnNewDocument(async () => {
-            // Add a small delay to let Cloudflare's JS execute
-            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-            await sleep(Math.floor(Math.random() * 1000) + 2000);
-        });
-        // Navigation retry loop
-        for(let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                const response = await page.goto(url, {
-                    waitUntil: ['domcontentloaded', 'networkidle2'],
-                    timeout: 60000
-                });
-
-                if(!response) {
-                    throw new Error('No response received');
-                }
-
-                if(!response.ok()) {
-                    throw new Error(`Server error: ${response.status()} ${response.statusText()}`);
-                }
-
-                // Wait for any dynamic content
-                await delay(3000);
-
-                // Check for bot detection elements
-                const botDetection = await page.evaluate(() => {
-                    const elements = document.querySelectorAll('*');
-                    for(const el of elements) {
-                        if(el.textContent && el.textContent.toLowerCase().includes('detected automated')) {
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-
-                if(botDetection) {
-                    throw new Error('Bot detection encountered');
-                }
-
-                return response;
-
-            } catch(error) {
-                logger.error(`Navigation attempt ${attempt} failed:`, {
-                    error: error.message,
-                    url,
-                    attempt
-                });
-
-                if(attempt === maxRetries) {
-                    throw error;
-                }
-
-                // Clear session data before retry
-                const client = await page.target().createCDPSession();
-                await Promise.all([
-                    client.send('Network.clearBrowserCookies'),
-                    client.send('Network.clearBrowserCache')
-                ]);
-
-                // Exponential backoff using the delay function
-                await delay(Math.pow(2, attempt) * 1000);
-            }
-        }
-    } catch(error) {
-        logger.error('Navigation failed:', {
-            error: error.message,
-            url
-        });
-        throw error;
-    }
-};
-
-// Content loading helper function
-const waitForContent = async (page) => {
-    try {
-        // Wait for all images in viewport to load
-        await page.evaluate(async () => {
-            // Define delay function inside evaluate context
-            const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-            // Function to scroll and wait
-            const scrollAndWait = async () => {
-                const scrollHeight = document.documentElement.scrollHeight;
-                const viewportHeight = window.innerHeight;
-                let lastScroll = window.pageYOffset;
-
-                // Scroll in chunks
-                for(let i = 0; i < scrollHeight; i += viewportHeight) {
-                    window.scrollTo(0, i);
-                    await delay(100);
-
-                    // Check if we've stopped scrolling
-                    if(window.pageYOffset === lastScroll) {
-                        break;
-                    }
-                    lastScroll = window.pageYOffset;
-                }
-
-                // Return to top
-                window.scrollTo(0, 0);
-                await delay(500);
-            };
-
-            // Perform initial scroll
-            await scrollAndWait();
-
-            // Wait for images to load
-            const images = Array.from(document.getElementsByTagName('img'));
-            await Promise.all(
-                images.map(img => {
-                    if(img.complete) return Promise.resolve();
-                    return new Promise(resolve => {
-                        const loadHandler = () => {
-                            img.removeEventListener('load', loadHandler);
-                            img.removeEventListener('error', errorHandler);
-                            resolve();
-                        };
-                        const errorHandler = () => {
-                            img.removeEventListener('load', loadHandler);
-                            img.removeEventListener('error', errorHandler);
-                            resolve();
-                        };
-                        img.addEventListener('load', loadHandler);
-                        img.addEventListener('error', errorHandler);
-                        setTimeout(resolve, 5000); // Timeout after 5 seconds
-                    });
-                })
-            );
-
-            // Final scroll to ensure everything is loaded
-            await scrollAndWait();
-
-            // Final delay for stability
-            await delay(1000);
-        });
-
-        // Add a final delay outside evaluate context
-        await delay(2000);
-
-    } catch(error) {
-        logger.error('Error waiting for content', {
-            error: error.message,
-            stack: error.stack
-        });
-        // Continue despite errors to avoid blocking screenshot
-    }
-};
-
-
-// Screenshot endpoint
 app.post('/create-screenshot', validateApiKey, async (req, res) => {
+    // Extract parameters from the request body with fallback/default values
     const {
         url,
-        format = config.screenshot.format.default,
-        quality = config.screenshot.quality.default
+        delay: delayTime = config.screenshot.delay || 2.0, // Default delay: 2.0 seconds
+        format = config.screenshot.format.default || 'jpeg', // Default format: jpeg
+        quality = config.screenshot.quality.default || 90, // Default quality: 90
+        width = config.screenshot.dimensions.default.width || 1366, // Default width: 1366
+        height = config.screenshot.dimensions.default.height || 1080, // Default height: 1080
+        fullPage = false // Default to false if not provided
     } = req.body;
+
     const sessionId = crypto.randomBytes(16).toString('hex');
     const startTime = Date.now();
 
     let browser = null;
     let page = null;
-    let outputPath = null;
 
-    logger.info('Starting screenshot creation', {
+    logger.info('Starting screenshot creation request', {
         url,
         format,
         quality,
+        width,
+        height,
+        fullPage,
+        delay: delayTime,
         sessionId,
         correlationId: req.correlationId
     });
 
+    // Validate URL
     if (!url || !validateUrl(url)) {
         return res.status(400).json({ error: 'Valid URL is required' });
     }
 
-    // Validate format and quality
+    // Validate format
     if (!config.screenshot.format.allowed.includes(format)) {
         return res.status(400).json({
             error: 'Invalid format',
-            allowed: config.screenshot.format.allowed
+            message: `Allowed formats: ${config.screenshot.format.allowed.join(', ')}`
         });
     }
 
-    if (quality < config.screenshot.quality.min || quality > config.screenshot.quality.max) {
+    // Validate dimensions
+    if (
+        width < config.screenshot.dimensions.min.width || width > config.screenshot.dimensions.max.width ||
+        height < config.screenshot.dimensions.min.height || height > config.screenshot.dimensions.max.height
+    ) {
         return res.status(400).json({
-            error: 'Invalid quality value',
-            range: `${config.screenshot.quality.min}-${config.screenshot.quality.max}`
+            error: 'Invalid dimensions',
+            message: `Width must be between ${config.screenshot.dimensions.min.width} and ${config.screenshot.dimensions.max.width}, height between ${config.screenshot.dimensions.min.height} and ${config.screenshot.dimensions.max.height}`
         });
     }
 
     try {
-        // Create necessary directories
-        await ensureDirectoryExists(path.join(__dirname, config.dirs.screenshots));
+        // Ensure directories exist
+        await ensureDirectoryExists(config.dirs.screenshots);
 
-        // Initialize browser and page
+        // Create a browser instance with a random user agent
         browser = await createBrowserInstance();
-        activeBrowsers.add(browser);
-        page = await browser.newPage();
+        page = await createPageWithTimeout(browser);
 
-        // Set initial viewport
-        await page.setViewport({
-            width: config.screenshot.dimensions.default.width,
-            height: config.screenshot.dimensions.default.height,
-            deviceScaleFactor: 1
-        });
+        // Set a random user agent
+        await setupUserAgent(page);
+        // Set viewport size
+        await page.setViewport({ width: parseInt(width), height: parseInt(height), deviceScaleFactor: 1 });
 
-        // Configure request interception
+        // Enable request interception
         await page.setRequestInterception(true);
         page.on('request', (request) => {
-            const resourceType = request.resourceType();
-            const url = request.url().toLowerCase();
+            const blockedResourceTypes = [
+                // 'image', // Block images (optional, depending on your needs)
+                'media', // Block media (videos, audio)
+                'font',  // Block fonts
+                // 'stylesheet', // Block stylesheets (optional, depending on your needs)
+            ];
 
-            // Only allow essential resources
-            if (resourceType === 'document' ||
-                resourceType === 'stylesheet' ||
-                (resourceType === 'image' && request.url().includes(url))) {
-                request.continue();
-            } else {
+            const blockedDomains = [
+                'google-analytics.com',
+                'googletagmanager.com',
+                'facebook.net',
+                'twitter.com',
+                'linkedin.com',
+                'connect.facebook.net',
+                'analytics.twitter.com',
+                'doubleclick.net',
+                'coinbase.com',
+                'coin-hive.com',
+                'crypto-loot.com',
+                'miner.pr0gramm.com',
+                'cdn-cgi/challenge-platform',
+                'adservice.google.com',
+                'ads.google.com',
+                'ad.doubleclick.net',
+                'adservice.google.com',
+                'adservice.google.*',
+                'ads.*.com',
+                'tracking.*',
+                'analytics.*',
+                'pixel.*',
+                'beacon.*',
+                'crypto.*',
+                'miner.*',
+            ];
+
+            const url = request.url();
+
+            // Block specific resource types
+            if (blockedResourceTypes.includes(request.resourceType())) {
                 request.abort();
+                return;
             }
 
-            // if (resourceType === 'image' || resourceType === 'font' || resourceType === 'stylesheet') {
-            //     request.continue();
-            // } else if (resourceType === 'script') {
-            //     if (url.includes('google-analytics') ||
-            //         url.includes('googletagmanager') ||
-            //         url.includes('tracking')) {
-            //         request.abort();
-            //     } else {
-            //         request.continue();
-            //     }
-            // } else if (resourceType === 'media' || resourceType === 'websocket') {
-            //     request.abort();
-            // } else {
-            //     request.continue();
-            // }
+            // Block specific domains
+            if (blockedDomains.some(domain => url.includes(domain))) {
+                request.abort();
+                return;
+            }
+
+            // Allow all other requests
+                request.continue();
+        });
+        // Navigate to the URL with retry logic
+        await withRetry(async () => {
+            try {
+            await page.goto(url, {
+                waitUntil: ['networkidle0', 'domcontentloaded'],
+                    timeout: parseInt(process.env.PAGE_NAVIGATION_TIMEOUT) || 60000,
+                    ignoreHTTPSErrors: true // Add this line to ignore SSL errors
+            });
+            } catch (error) {
+                // Log the SSL error but continue to capture the screenshot
+                if (error.message.includes('ERR_CERT_COMMON_NAME_INVALID')) {
+                    logger.warn('SSL certificate error, but proceeding to capture screenshot', {
+                        url,
+                        error: error.message
+                    });
+                } else {
+                    throw error; // Re-throw other errors
+                }
+            }
+
+            // Wait for the specified delay
+            await delay(parseFloat(delayTime) * 1000);
+
+            // Wait for page to be fully loaded
+            await page.evaluate(() => {
+                return new Promise((resolve) => {
+                    if (document.readyState === 'complete') {
+                        resolve();
+                    } else {
+                        window.addEventListener('load', resolve);
+                    }
+                });
+            });
+
+            // Scroll through the page to trigger lazy-loaded images
+            await scrollThroughPage(page);
         });
 
-        // Error handling for page events
-        page.on('error', error => {
-            logger.error('Page error occurred', { error: error.message, sessionId });
-        });
-
-        page.on('pageerror', error => {
-            logger.error('Page error occurred', { error: error.message, sessionId });
-        });
-
-        // Navigate to the URL
-        await navigateToPage(page, url);
-
-        // Wait for content and handle lazy loading
-        await waitForContent(page);
-
-        // Get page dimensions
-        const dimensions = await page.evaluate(() => ({
-            width: Math.max(
-                document.documentElement.clientWidth,
-                document.body ? document.body.scrollWidth : 0,
-                document.documentElement.scrollWidth,
-                document.documentElement.offsetWidth
-            ),
-            height: Math.max(
-                document.documentElement.clientHeight,
-                document.body ? document.body.scrollHeight : 0,
-                document.documentElement.scrollHeight,
-                document.documentElement.offsetHeight
-            )
-        }));
-
-        // Update viewport to match content
-        await page.setViewport({
-            width: Math.min(dimensions.width, config.screenshot.dimensions.max.width),
-            height: Math.min(dimensions.height, config.screenshot.dimensions.max.height),
-            deviceScaleFactor: 1
-        });
-
-        // Wait for layout to stabilize
-        await delay(2000);
-
-        // Generate unique filename and path
+        // Generate a unique filename
         const filename = `${sessionId}.${format}`;
-        outputPath = path.join(config.dirs.screenshots, filename);
+        const screenshotPath = path.join(config.dirs.screenshots, filename);
 
-        // Take the screenshot
+        // Capture the screenshot
         const screenshotOptions = {
-            path: outputPath,
-            fullPage: true,
             type: format,
-            quality: format === 'jpeg' ? quality : undefined,
-            optimizeForSpeed: true
+            quality: parseInt(quality),
+            fullPage: fullPage // Use the fullPage parameter here
         };
+        await page.screenshot(screenshotOptions).then((buffer) => {
+            fsPromises.writeFile(screenshotPath, buffer);
+        });
 
-        await page.screenshot(screenshotOptions);
-
-        // Generate response URL
+        // Generate the response URL
         const screenshotUrl = `${config.server.host}/public/screenshots/${filename}`;
 
         logger.info('Screenshot creation successful', {
             url: screenshotUrl,
             format,
-            dimensions,
+            quality,
+            width,
+            height,
+            fullPage,
+            delay: delayTime,
             sessionId,
             duration: (Date.now() - startTime) / 1000
         });
@@ -1520,41 +1238,43 @@ app.post('/create-screenshot', validateApiKey, async (req, res) => {
         res.json({
             success: true,
             url: screenshotUrl,
-            dimensions: {
-                width: dimensions.width,
-                height: dimensions.height
-            }
+            message: 'Screenshot created successfully'
         });
-
     } catch (error) {
-        logger.error('Screenshot creation failed', {
+        const errorDuration = (Date.now() - startTime) / 1000;
+        logger.error('Error creating screenshot', {
             error,
             correlationId: req.correlationId,
             sessionId,
-            duration: (Date.now() - startTime) / 1000
+            duration: errorDuration
         });
-
         res.status(500).json({
             error: 'Failed to create screenshot',
             details: error.message
         });
-
     } finally {
-        try {
-            if (page) {
-                await page.close().catch(() => {});
+        // Cleanup
+        if (page) {
+            try {
+                await page.close();
+            } catch (e) {
+                logger.error('Error closing page', e, { sessionId });
             }
-            if (browser) {
-                await browser.close().catch(() => {});
-                activeBrowsers.delete(browser);
-            }
-        } catch (error) {
-            logger.error('Error in cleanup', {
-                error,
-                correlationId: req.correlationId,
-                sessionId
-            });
         }
+
+        if (browser) {
+            try {
+                await browser.close();
+                activeBrowsers.delete(browser);
+            } catch (e) {
+                logger.error('Error closing browser', e, { sessionId });
+            }
+        }
+
+        logger.info('Cleanup completed', {
+            sessionId,
+            totalDuration: (Date.now() - startTime) / 1000
+        });
     }
 });
 

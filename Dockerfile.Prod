@@ -4,7 +4,7 @@ FROM node:18-bullseye-slim
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV CHROME_PATH=/usr/bin/chromium
-ENV NODE_ENV=development
+ENV NODE_ENV=production
 ENV PUPPETEER_HEADLESS=new
 # Add explicit sandbox configuration
 ENV CHROME_DEVEL_SANDBOX=/usr/local/sbin/chrome-devel-sandbox
@@ -59,13 +59,7 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 
 # Install dependencies
-#RUN npm install --omit=dev
 RUN npm install -g npm@10.2.4
-
-# Development dependencies
-#RUN npm install --global nodemon
-#RUN npm install && npm cache clean --force
-
 # Production dependencies
 RUN npm i --only=production && npm cache clean --force
 
@@ -87,7 +81,5 @@ USER node
 EXPOSE 3000
 
 # Start the application
-# Development command
-#CMD [ "npm", "run", "dev" ]
 # Production command
 CMD [ "npm", "run", "start" ]

@@ -1,4 +1,26 @@
 services:
+  nginx:
+#    container_name: reverse-proxy
+    user: root
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/nginx.conf:ro
+      - ./logs/nginx/:/var/log/nginx
+    environment:
+      - NODE_ENV=development
+    depends_on:
+      - app
+    networks:
+      - app-network
   app:
     image: manshooras/screenshot-service:latest
     init: true  # Add this to handle zombie processes better
@@ -13,18 +35,21 @@ services:
     security_opt:
       - seccomp=unconfined
     build: .
-    container_name: screenshot-service
+#    container_name: screenshot-service
     env_file: .env
     ports:
       - "3000:3000"
     volumes:
+      - .:/usr/src/app
       - ./public:/usr/src/app/public
+      - /usr/src/app/node_modules
       - /dev/shm:/dev/shm
+      - ./logs/node:/usr/src/app/logs
     depends_on:
       redis:
         condition: service_healthy
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=development
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
       - REDIS_URL=redis
       - PUPPETEER_DISABLE_CRASHPAD=true
@@ -33,6 +58,9 @@ services:
       - PULSEAUDIO_SERVER=dummy
       - ALSA_CARD=none
       - AUDIO_DRIVER=null
+      - DBUS_SESSION_BUS_ADDRESS=/dev/null
+      - DISABLE_CRASHPAD=true
+      - CHROMIUM_FLAGS=--disable-gpu,--no-sandbox,--disable-dev-shm-usage
     tmpfs:
       - /tmp
       - /run
@@ -52,13 +80,16 @@ services:
       timeout: 20s
       retries: 3
       start_period: 60s
+    networks:
+      - app-network
 
   redis:
     image: redis:7-alpine
-    container_name: screenshot-service-redis
+#    container_name: screenshot-service-redis
     command: redis-server --appendonly yes
     volumes:
-      - redis-data:/data
+      - ./data/redis:/data
+      - ./logs/redis:/var/log/redis:rw
     ports:
       - "6379:6379"
     environment:
@@ -77,6 +108,14 @@ services:
         reservations:
           cpus: '0.5'
           memory: 1G
+    networks:
+      - app-network
 
 volumes:
   redis-data:
+    driver: local
+
+networks:
+  app-network:
+    driver: overlay
+    attachable: true

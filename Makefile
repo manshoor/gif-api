@@ -20,22 +20,22 @@ up-d:
 	docker-compose up -d
 
 up-d-prod:
-	docker-compose -f docker-compose.yml up -d
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 up-d-prod-build:
-	docker-compose -f docker-compose.yml up -d --build --remove-orphans
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
 
 up-d-prod-build-node:
-	docker-compose -f docker-compose.yml up -d --no-deps --build --remove-orphans app
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-deps --build --remove-orphans app
 
 up-d-prod-build-node-force:
-	docker-compose -f docker-compose.yml up -d --force-recreate --no-deps --build --remove-orphans app
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d --force-recreate --no-deps --build --remove-orphans app
 
 prod-push-node:
-	docker-compose -f docker-compose.yml push app
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml push app
 
 prod-pull-node:
-	docker-compose -f docker-compose.yml pull app
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml pull app
 
 build-image:
 	docker build -t manshooras/screenshot-service:latest .
@@ -51,6 +51,9 @@ down:
 
 down-V:
 	docker-compose down -v
+
+down-stack:
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml down -v
 
 volume:
 	docker volume inspect screenshot-api_redisdata
