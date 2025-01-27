@@ -1,19 +1,24 @@
 services:
   nginx:
+    image: nginx:stable-alpine
     ports:
-      - "80:80"
-      - "443:443"
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
     volumes:
       - ./nginx/default.conf:/etc/nginx/nginx.conf:ro
       - ./logs/nginx/:/var/log/nginx
-    user: root  # Explicit user
+      - ./public:/usr/src/app/public
+    user: root
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
     deploy:
-      replicas: 2
+      mode: replicated
+      replicas: 1
       restart_policy:
         condition: any
       update_config:
@@ -23,19 +28,27 @@ services:
         limits:
           cpus: '1'
           memory: 512M
+    networks:
+      - app-network
 
   app:
+    image: ${REGISTRY:-localhost}/screenshot-service:${TAG:-latest}
     deploy:
+      mode: replicated
       replicas: 3
       restart_policy:
         condition: any
       update_config:
         parallelism: 2
         delay: 15s
+        order: start-first
       resources:
         limits:
           cpus: '2'
           memory: 3G
+        reservations:
+          cpus: '1'
+          memory: 2G
     build:
       context: ./
       dockerfile: Dockerfile.Prod
@@ -62,11 +75,17 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - app-network
 
   redis:
     image: redis:7-alpine
     deploy:
+      mode: replicated
       replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       restart_policy:
         condition: any
       resources:
@@ -81,10 +100,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    networks:
+      - app-network
 
 volumes:
   redis-data:
+    driver: local
 
 networks:
-  default:
+  app-network:
     driver: overlay
+    attachable: true
