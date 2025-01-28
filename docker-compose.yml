@@ -27,7 +27,7 @@ services:
     init: true  # Add this to handle zombie processes better
     cap_add:
       - SYS_ADMIN  # This helps with Chrome's sandbox
-    shm_size: '2gb'
+    shm_size: '4gb'
     ulimits:
       core: 0
       nofile:
@@ -54,14 +54,6 @@ services:
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
       - REDIS_URL=redis
       - PUPPETEER_DISABLE_CRASHPAD=true
-      - CHROME_LAUNCH_ARGS=--disable-http2,--use-fake-ui-for-media-stream,--use-fake-device-for-media-stream,--no-sandbox,--disable-dev-shm-usage
-      - PUPPETEER_SKIP_CHROME_HEADLESS_SHELL=true
-      - PULSEAUDIO_SERVER=dummy
-      - ALSA_CARD=none
-      - AUDIO_DRIVER=null
-      - DBUS_SESSION_BUS_ADDRESS=/dev/null
-      - DISABLE_CRASHPAD=true
-      - CHROMIUM_FLAGS=--disable-gpu,--no-sandbox,--disable-dev-shm-usage
     tmpfs:
       - /tmp
       - /run
@@ -71,10 +63,10 @@ services:
       resources:
         limits:
           cpus: '2'
-          memory: 4G
+          memory: 8G
         reservations:
           cpus: '1'
-          memory: 2G
+          memory: 3G
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
       interval: 45s

@@ -362,9 +362,10 @@ const createBrowserInstance = async () => {
         handleSIGHUP: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         timeout: parseInt(process.env.BROWSER_LAUNCH_TIMEOUT) || 60000, // Increased timeout
-        pipe: true,
+        protocolTimeout: 180000, // Increase to 3 minutes
+        // pipe: true,
         ignoreHTTPSErrors: true,
-        dumpio: true,
+        // dumpio: true,
         env: {
             ...process.env,
             DISABLE_CRASHPAD: "true",
@@ -421,7 +422,6 @@ const createBrowserInstance = async () => {
             '--disable-features=ScriptStreaming',
             '--js-flags="--max-old-space-size=512"',
             '--disable-gpu-sandbox',
-            '--disable-software-rasterizer',
             '--no-default-browser-check',
             '--no-experiments',
             '--single-process', // Use single process to avoid complications
@@ -444,7 +444,18 @@ const createBrowserInstance = async () => {
             '--disable-features=TranslateUI',
             '--disable-blink-features=AutomationControlled',
             '--disable-device-discovery-notifications',
-            '--disable-session-crashed-bubble'
+            '--disable-session-crashed-bubble',
+
+            //
+            '--disable-component-update',
+            '--disable-domain-reliability',
+            '--disable-features=AudioServiceOutOfProcess',
+            '--disable-hang-monitor',
+            '--metrics-recording-only',
+            '--password-store=basic',
+            '--use-gl=swiftshader',
+            '--use-mock-keychain',
+            '--disable-component-extensions-with-background-pages'
         ]
     });
 
@@ -460,6 +471,7 @@ const createBrowserInstance = async () => {
         await cleanupZombieProcesses();
     });
 
+    activeBrowsers.add(browser);
     return browser;
 };
 
@@ -468,46 +480,48 @@ const createPageWithTimeout = async (browser) => {
     const page = await browser.newPage();
 
     // Set a default timeout for all operations
-    page.setDefaultTimeout(30000);
+    // page.setDefaultTimeout(30000);
 
     // Set up error handling
-    page.on('console', msg => {
-        logger.info('Browser console:', {
-            type: msg.type(),
-            text: msg.text(),
-            location: msg.location()?.url  // Add source location if available
-        });
-    });
-
-    page.on('requestfailed', request => {
-        logger.error('Failed request:', {
-            url: request.url(),
-            errorText: request.failure()?.errorText || 'Unknown error',
-            method: request.method(),
-            resourceType: request.resourceType()
-        });
-    });
-
-    // Add page error handler
-    page.on('pageerror', error => {
-        logger.error('Page error:', {
-            message: error.message,
-            stack: error.stack,
-            name: error.name
-        });
-    });
-
-    // Add response error handler
-    page.on('response', response => {
-        if (!response.ok()) {
-            logger.error('Failed response:', {
-                url: response.url(),
-                status: response.status(),
-                statusText: response.statusText(),
-                headers: response.headers()
+/*
+        page.on('console', msg => {
+            logger.info('Browser console:', {
+                type: msg.type(),
+                text: msg.text(),
+                location: msg.location()?.url  // Add source location if available
             });
-        }
-    });
+        });
+
+        page.on('requestfailed', request => {
+            logger.error('Failed request:', {
+                url: request.url(),
+                errorText: request.failure()?.errorText || 'Unknown error',
+                method: request.method(),
+                resourceType: request.resourceType()
+            });
+        });
+
+        // Add page error handler
+        page.on('pageerror', error => {
+            logger.error('Page error:', {
+                message: error.message,
+                stack: error.stack,
+                name: error.name
+            });
+        });
+
+        // Add response error handler
+        page.on('response', response => {
+            if (!response.ok()) {
+                logger.error('Failed response:', {
+                    url: response.url(),
+                    status: response.status(),
+                    statusText: response.statusText(),
+                    headers: response.headers()
+                });
+            }
+        });
+    */
 
     return page;
 };
@@ -808,12 +822,19 @@ async function generateOutput(sessionDir, outputPath, fps, format) {
 }
 
 const scrollThroughPage = async (page) => {
+    try {
     await page.evaluate(async () => {
         await new Promise((resolve) => {
             let totalHeight = 0;
-            const distance = 100; // Scroll distance in pixels
+                const distance = 400;
             const timer = setInterval(() => {
-                const scrollHeight = document.body.scrollHeight;
+                    const scrollHeight = document.body?.scrollHeight || document.documentElement?.scrollHeight || 0;
+                    if (scrollHeight === 0) {
+                        clearInterval(timer);
+                        resolve();
+                        return;
+                    }
+
                 window.scrollBy(0, distance);
                 totalHeight += distance;
 
@@ -822,17 +843,50 @@ const scrollThroughPage = async (page) => {
                     clearInterval(timer);
                     resolve();
                 }
-            }, 100); // Scroll every 100ms
+                }, 200);
+
+                // Safeguard: maximum scroll time
+                setTimeout(() => {
+                    clearInterval(timer);
+                    resolve();
+                }, 6000); // 6 second maximum
+        });
+    });
+    } catch (error) {
+        // Log but don't throw - scrolling is enhancement, not critical
+        console.error('Scrolling error:', error);
+    }
+};
+
+const autoScroll = async (page) => {
+    await page.evaluate(async () => {
+        await new Promise((resolve) => {
+            let totalHeight = 0;
+            const distance = 400;
+            const timer = setInterval(() => {
+                const scrollHeight = document.body.scrollHeight;
+                window.scrollBy(0, distance);
+                totalHeight += distance;
+
+                if (totalHeight >= scrollHeight) {
+                    window.scrollTo(0, 0);
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 200);
         });
     });
 };
-
 const setupUserAgent = async (page) => {
     const userAgent = new UserAgent({deviceCategory: 'desktop'}).toString();
     await page.setUserAgent(userAgent);
     await page.setExtraHTTPHeaders({
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://www.google.com/',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
     });
 }
 
@@ -1045,8 +1099,319 @@ app.post('/create-video', validateApiKey, async (req, res) => {
     }
 });
 
+// Add this function to track response status
+const waitForNetworkSettled = async (page, timeout = 30000) => {
+    try {
+        return await Promise.race([
+            new Promise(async (resolve) => {
+                let pendingRequests = 0;
+                let responseCount = 0;
+
+                page.on('request', () => {
+                    pendingRequests++;
+                });
+
+                page.on('requestfailed', () => {
+                    pendingRequests--;
+                });
+
+                page.on('response', async (response) => {
+                    responseCount++;
+                    try {
+                        const status = response.status();
+                        const url = response.url();
+                        const resourceType = response.request().resourceType();
+
+                        logger.info('Response received:', {
+                            url,
+                            status,
+                            resourceType,
+                            pendingRequests,
+                            responseCount
+                        });
+                    } catch (error) {
+                        logger.error('Error processing response:', error.toString());
+                    }
+                    pendingRequests--;
+
+                    // Consider network settled when all initial requests are done
+                    if (pendingRequests <= 0 && responseCount > 0) {
+                        resolve(true);
+                    }
+                });
+
+                // Initial delay to allow first requests to start
+                await delay(1000);
+
+                // If no pending requests after initial delay, resolve
+                if (pendingRequests <= 0 && responseCount > 0) {
+                    resolve(true);
+                }
+            }),
+            new Promise((resolve) =>
+                setTimeout(() => resolve(false), timeout)
+            )
+        ]);
+    } catch (error) {
+        logger.error('Error in waitForNetworkSettled:', error.toString());
+        return false;
+    }
+};
+
+const navigateAndWait = async (page, url) => {
+    try {
+        // Set longer timeout for navigation
+        page.setDefaultNavigationTimeout(60000);
+
+        const response = await page.goto(url, {
+            waitUntil: 'networkidle2',
+            timeout: 60000
+        });
+
+        // Wait for things to settle
+        await delay(2000);
+
+        // Check if navigation was successful
+        if (!response || !response.ok()) {
+            throw new Error(`Navigation failed with status: ${response?.status() || 'unknown'}`);
+        }
+
+        // Wait for JavaScript to execute
+        await page.waitForFunction(() => document.readyState === 'complete', {
+            timeout: 30000
+        });
+
+        // Perform scroll after content is loaded
+        await autoScroll(page);
+
+        return true;
+    } catch (error) {
+        logger.error('Navigation failed:', error);
+        return false;
+    }
+};
 
 app.post('/create-screenshot', validateApiKey, async (req, res) => {
+    // Extract parameters from the request body with fallback/default values
+    const {
+        url,
+        delay: delayTime = config.screenshot.delay || 2.0, // Default delay: 2.0 seconds
+        format = config.screenshot.format.default || 'jpeg', // Default format: jpeg
+        quality = config.screenshot.quality.default || 90, // Default quality: 90
+        width = config.screenshot.dimensions.default.width || 1366, // Default width: 1366
+        height = config.screenshot.dimensions.default.height || 1080, // Default height: 1080
+        fullPage = false // Default to false if not provided
+    } = req.body;
+
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    const startTime = Date.now();
+
+    let browser = null;
+    let page = null;
+
+    logger.info('Starting screenshot creation request', {
+        url,
+        format,
+        quality,
+        width,
+        height,
+        fullPage,
+        delay: delayTime,
+        sessionId,
+        correlationId: req.correlationId
+    });
+
+    // Validate URL
+    if(!url || !validateUrl(url)) {
+        return res.status(400).json({error: 'Valid URL is required'});
+    }
+
+    // Validate format
+    if(!config.screenshot.format.allowed.includes(format)) {
+        return res.status(400).json({
+            error: 'Invalid format',
+            message: `Allowed formats: ${config.screenshot.format.allowed.join(', ')}`
+        });
+    }
+
+    // Validate dimensions
+    if(
+        width < config.screenshot.dimensions.min.width || width > config.screenshot.dimensions.max.width ||
+        height < config.screenshot.dimensions.min.height || height > config.screenshot.dimensions.max.height
+    ) {
+        return res.status(400).json({
+            error: 'Invalid dimensions',
+            message: `Width must be between ${config.screenshot.dimensions.min.width} and ${config.screenshot.dimensions.max.width}, height between ${config.screenshot.dimensions.min.height} and ${config.screenshot.dimensions.max.height}`
+        });
+    }
+
+    try {
+        // Ensure directories exist
+        await ensureDirectoryExists(config.dirs.screenshots);
+
+        // Create a browser instance with a random user agent
+        browser = await createBrowserInstance();
+        page = await createPageWithTimeout(browser);
+        page.setDefaultNavigationTimeout(0);
+
+        // Set viewport size
+        await page.setViewport({width: parseInt(width), height: parseInt(height), deviceScaleFactor: 1});
+
+        // Set a random user agent
+        await setupUserAgent(page);
+
+
+        // Enable request interception
+        await page.setRequestInterception(true);
+        page.on('request', (request) => {
+            const blockedResourceTypes = [
+                // 'image', // Block images (optional, depending on your needs)
+                'media', // Block media (videos, audio)
+                // 'font',  // Block fonts
+                // 'stylesheet', // Block stylesheets (optional, depending on your needs)
+            ];
+
+            const blockedDomains = [
+                'google-analytics.com',
+                'googletagmanager.com',
+                'facebook.net',
+                'twitter.com',
+                'linkedin.com',
+                'connect.facebook.net',
+                'analytics.twitter.com',
+                'doubleclick.net',
+                'coinbase.com',
+                'coin-hive.com',
+                'crypto-loot.com',
+                'miner.pr0gramm.com',
+                'cdn-cgi/challenge-platform',
+                'adservice.google.com',
+                'ads.google.com',
+                'ad.doubleclick.net',
+                'adservice.google.com',
+                'adservice.google.*',
+                'ads.*.com',
+                'tracking.*',
+                'analytics.*',
+                'pixel.*',
+                'beacon.*',
+                'crypto.*',
+                'miner.*',
+            ];
+
+            const url = request.url().toLowerCase();
+            const resourceType = request.resourceType();
+
+            if(blockedResourceTypes.includes(resourceType) ||
+                blockedDomains.some(domain => url.includes(domain))) {
+                request.abort();
+                return;
+            }
+
+            // Allow all other requests
+            request.continue();
+        });
+        try {
+            let status = await page.goto(url, {
+                waitUntil: ['networkidle2'],
+                timeout: 0,
+                ignoreHTTPSErrors: true // Add this line to ignore SSL errors
+            }).catch(e => console.log(e.toString()));
+            await Promise.all([
+                page.waitForResponse(response => response.status() === 200, {timeout: 1000}).catch(e => console.log(e.toString())),
+                autoScroll(page).catch(e => console.log(e.toString())),
+                page.emulateMediaType('screen').catch(e => console.log(e.toString())),
+            ]).then(results => {
+                console.log(` -------> status: \n ${status.status()} \n`);
+                console.log(` -------> results: \n Navigation Done \n`);
+            }).catch(e => console.error(e.toString()));
+        } catch(error) {
+            // Log the SSL error but continue to capture the screenshot
+            if(error.message.includes('ERR_CERT_COMMON_NAME_INVALID')) {
+                logger.warn('SSL certificate error, but proceeding to capture screenshot', {
+                    url,
+                    error: error.message
+                });
+            } else {
+                throw error; // Re-throw other errors
+            }
+        }
+
+        // Generate a unique filename
+        const filename = `${sessionId}.${format}`;
+        const screenshotPath = path.join(config.dirs.screenshots, filename);
+
+        // Capture the screenshot
+        const screenshotOptions = {
+            path: screenshotPath,
+            type: format,
+            quality: parseInt(quality),
+            fullPage: fullPage,
+            omitBackground: true,
+            captureBeyondViewport: fullPage
+        };
+
+        await page.screenshot(screenshotOptions).catch(e => console.error(` -------> \n unable to capture ${e.toString()} \n`));
+        // Generate the response URL
+        const screenshotUrl = `${config.server.host}/public/screenshots/${filename}`;
+
+        logger.info('Screenshot creation successful', {
+            url: screenshotUrl,
+            format,
+            quality,
+            width,
+            height,
+            fullPage,
+            delay: delayTime,
+            sessionId,
+            duration: (Date.now() - startTime) / 1000
+        });
+
+        res.json({
+            success: true,
+            url: screenshotUrl,
+            message: 'Screenshot created successfully'
+        });
+    } catch(error) {
+        const errorDuration = (Date.now() - startTime) / 1000;
+        logger.error('Error creating screenshot', {
+            error,
+            correlationId: req.correlationId,
+            sessionId,
+            duration: errorDuration
+        });
+        res.status(500).json({
+            error: 'Failed to create screenshot',
+            details: error.message
+        });
+    } finally {
+        // Cleanup
+        if(page) {
+            try {
+                await page.close();
+            } catch(e) {
+                logger.error('Error closing page', e, {sessionId});
+            }
+        }
+
+        if(browser) {
+            try {
+                await browser.close();
+                activeBrowsers.delete(browser);
+            } catch(e) {
+                logger.error('Error closing browser', e, {sessionId});
+            }
+        }
+
+        logger.info('Cleanup completed', {
+            sessionId,
+            totalDuration: (Date.now() - startTime) / 1000
+        });
+    }
+});
+
+
+app.post('/create-screenshot-legacy', validateApiKey, async (req, res) => {
     // Extract parameters from the request body with fallback/default values
     const {
         url,
@@ -1107,11 +1472,14 @@ app.post('/create-screenshot', validateApiKey, async (req, res) => {
         // Create a browser instance with a random user agent
         browser = await createBrowserInstance();
         page = await createPageWithTimeout(browser);
+        page.setDefaultNavigationTimeout(0);
+
+        // Set viewport size
+        await page.setViewport({ width: parseInt(width), height: parseInt(height), deviceScaleFactor: 1 });
 
         // Set a random user agent
         await setupUserAgent(page);
-        // Set viewport size
-        await page.setViewport({ width: parseInt(width), height: parseInt(height), deviceScaleFactor: 1 });
+
 
         // Enable request interception
         await page.setRequestInterception(true);
@@ -1119,7 +1487,7 @@ app.post('/create-screenshot', validateApiKey, async (req, res) => {
             const blockedResourceTypes = [
                 // 'image', // Block images (optional, depending on your needs)
                 'media', // Block media (videos, audio)
-                'font',  // Block fonts
+                // 'font',  // Block fonts
                 // 'stylesheet', // Block stylesheets (optional, depending on your needs)
             ];
 
@@ -1151,16 +1519,11 @@ app.post('/create-screenshot', validateApiKey, async (req, res) => {
                 'miner.*',
             ];
 
-            const url = request.url();
+            const url = request.url().toLowerCase();
+            const resourceType = request.resourceType();
 
-            // Block specific resource types
-            if (blockedResourceTypes.includes(request.resourceType())) {
-                request.abort();
-                return;
-            }
-
-            // Block specific domains
-            if (blockedDomains.some(domain => url.includes(domain))) {
+            if (blockedResourceTypes.includes(resourceType) ||
+                blockedDomains.some(domain => url.includes(domain))) {
                 request.abort();
                 return;
             }
@@ -1168,45 +1531,48 @@ app.post('/create-screenshot', validateApiKey, async (req, res) => {
             // Allow all other requests
                 request.continue();
         });
+
         // Navigate to the URL with retry logic
-        await withRetry(async () => {
-            try {
-            await page.goto(url, {
-                waitUntil: ['networkidle0', 'domcontentloaded'],
-                    timeout: parseInt(process.env.PAGE_NAVIGATION_TIMEOUT) || 60000,
-                    ignoreHTTPSErrors: true // Add this line to ignore SSL errors
-            });
-            } catch (error) {
-                // Log the SSL error but continue to capture the screenshot
-                if (error.message.includes('ERR_CERT_COMMON_NAME_INVALID')) {
-                    logger.warn('SSL certificate error, but proceeding to capture screenshot', {
-                        url,
-                        error: error.message
-                    });
-                } else {
-                    throw error; // Re-throw other errors
-                }
-            }
+        // await withRetry(async () => {
+        await navigateAndWait(page, url);
+            // try {
+            // await page.goto(url, {
+            //     waitUntil: ['networkidle2', 'load', 'domcontentloaded'],
+            //     timeout: 0,
+            //     ignoreHTTPSErrors: true // Add this line to ignore SSL errors
+            // });
+            // } catch (error) {
+            //     // Log the SSL error but continue to capture the screenshot
+            //     if (error.message.includes('ERR_CERT_COMMON_NAME_INVALID')) {
+            //         logger.warn('SSL certificate error, but proceeding to capture screenshot', {
+            //             url,
+            //             error: error.message
+            //         });
+            //     } else {
+            //         throw error; // Re-throw other errors
+            //     }
+            // }
 
-            // Wait for the specified delay
-            await delay(parseFloat(delayTime) * 1000);
-
-            // Wait for page to be fully loaded
-            await page.evaluate(() => {
-                return new Promise((resolve) => {
-                    if (document.readyState === 'complete') {
-                        resolve();
-                    } else {
-                        window.addEventListener('load', resolve);
-                    }
-                });
-            });
+        // await Promise.all([
+            // page.emulateMediaType('screen').catch(e => logger.error('emulateMediaType: ', e.toString())),
+            // waitForNetworkSettled(page),
+        // ])
+                // Wait for all critical resources to load
+            // await page.evaluate(() => {
+            //     return new Promise((resolve) => {
+            //         if (document.readyState === 'complete') {
+            //             resolve();
+            //         } else {
+            //             window.addEventListener('load', resolve);
+            //         }
+            //     });
+            // });
 
             // Scroll through the page to trigger lazy-loaded images
-            await scrollThroughPage(page);
-        });
+            // await autoScroll(page);
+        // });
 
-        // Generate a unique filename
+        // Take the screenshot
         const filename = `${sessionId}.${format}`;
         const screenshotPath = path.join(config.dirs.screenshots, filename);
 
@@ -1214,7 +1580,8 @@ app.post('/create-screenshot', validateApiKey, async (req, res) => {
         const screenshotOptions = {
             type: format,
             quality: parseInt(quality),
-            fullPage: fullPage // Use the fullPage parameter here
+            fullPage: fullPage,
+            captureBeyondViewport: fullPage
         };
         await page.screenshot(screenshotOptions).then((buffer) => {
             fsPromises.writeFile(screenshotPath, buffer);
@@ -1277,7 +1644,6 @@ app.post('/create-screenshot', validateApiKey, async (req, res) => {
         });
     }
 });
-
 // Periodic cleanup functions
 setInterval(async () => {
     if(activeBrowsers.size > config.browser.maxInstances) {

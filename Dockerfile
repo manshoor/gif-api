@@ -1,4 +1,4 @@
-FROM node:18-bullseye-slim
+FROM node:18.20.6-bullseye-slim@sha256:0d1cb0343d1746709a9a83894985ad62394dcbe4fb2776a8fd9cf175a9a7ddb0
 
 # Set environment variables
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
@@ -50,24 +50,35 @@ RUN mkdir -p /var/run/dbus && \
     git \
     # Clean up
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    /var/cache/apt/* \
+    /usr/share/man \
+    /tmp/*
 
 # Create app directory
 WORKDIR /usr/src/app
 
+# Create a non-root user
+RUN groupadd -r node && useradd -r -g node -G audio,video node \
+    && mkdir -p /home/node/Downloads \
+    && chown -R node:node /home/node \
+    && chown -R node:node /usr/src/app
+
+ENV PATH="/usr/src/app/node_modules/.bin:${PATH}"
 # Copy package files
 COPY package*.json ./
 
 # Install dependencies
 #RUN npm install --omit=dev
-RUN npm install -g npm@10.2.4
+#RUN npm install -g npm@10.2.4
 
 # Development dependencies
-#RUN npm install --global nodemon
-#RUN npm install && npm cache clean --force
+RUN npm install && \
+    npm install -g npm@10.2.4 nodemon && \
+    npm cache clean --force \
 
 # Production dependencies
-RUN npm i --only=production && npm cache clean --force
+#RUN npm i --only=production && npm cache clean --force
 
 
 # Copy app source
